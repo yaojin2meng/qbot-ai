@@ -11,10 +11,10 @@ fi
 # 确保 wasm32 目标存在
 rustup target add wasm32-unknown-unknown || true
 
-# 安装 worker-build
+# 安装兼容 worker 0.4 的 worker-build 版本
 if ! command -v worker-build &> /dev/null; then
-  echo "==> Installing worker-build..."
-  cargo install worker-build --locked
+  echo "==> Installing worker-build (compatible with worker 0.4)..."
+  cargo install worker-build --version "^0.1"
 fi
 
 # 编译 worker
