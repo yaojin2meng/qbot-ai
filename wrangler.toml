@@ -1,0 +1,23 @@
+name = "qbot-ai"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-09-23"
+
+[build]
+command = "cargo install worker-build && worker-build --release"
+
+# D1 数据库绑定，先执行: wrangler d1 create qbot-db 然后把 id 填进来
+[[d1_databases]]
+binding = "DB"
+database_name = "qbot-db"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# KV 用于缓存模型测试结果/管理会话(可选)
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_YOUR_KV_ID"
+
+[vars]
+# QQ AppID / AppSecret 通过 wrangler secret 配置，不要明文写这里
+QQ_ENV = "production"
+# 开发调试时可设为 "true" 跳过 Ed25519 签名校验（生产必须为 false 或删除本项）
+SKIP_SIGNATURE = "false"

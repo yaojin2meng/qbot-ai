@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>qbot-ai 管理台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  .sub { color: #94a3b8; font-size: 13px; margin-bottom: 24px; }
+  .card { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid #334155; }
+  .card h2 { font-size: 17px; margin-bottom: 14px; color: #f1f5f9; }
+  input, select { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 9px 12px; border-radius: 8px; font-size: 14px; width: 100%; margin-bottom: 10px; }
+  input:focus { outline: none; border-color: #3b82f6; }
+  button { background: #3b82f6; color: #fff; border: none; padding: 9px 16px; border-radius: 8px; font-size: 14px; cursor: pointer; transition: .15s; }
+  button:hover { background: #2563eb; }
+  button:disabled { background: #475569; cursor: not-allowed; }
+  button.ghost { background: #334155; }
+  button.danger { background: #dc2626; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 160px; }
+  .config-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #334155; }
+  .config-item:last-child { border-bottom: none; }
+  .config-item .meta { font-size: 13px; }
+  .config-item .name { font-weight: 600; }
+  .config-item .url { color: #64748b; font-size: 12px; }
+  .muted { color: #64748b; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #334155; }
+  th { color: #94a3b8; font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+  .badge.ok { background: #16a34a; color: #fff; }
+  .badge.fail { background: #dc2626; color: #fff; }
+  .badge.empty { background: #d97706; color: #fff; }
+  #testImage img { max-width: 100%; border-radius: 10px; margin-top: 12px; }
+  #log { font-family: monospace; font-size: 12px; color: #94a3b8; white-space: pre-wrap; max-height: 200px; overflow: auto; }
+  .chip { display: inline-block; background: #0f172a; padding: 2px 8px; border-radius: 6px; font-size: 12px; margin: 2px; border: 1px solid #334155; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🤖 qbot-ai 管理台</h1>
+  <div class="sub">QQ 机器人 · 模型测速 · 投票管理</div>
+
+  <!-- API 配置 -->
+  <div class="card">
+    <h2>① 添加 API 配置</h2>
+    <div class="row">
+      <input class="grow" id="cfgName" placeholder="名称（如 DeepSeek）">
+      <input class="grow" id="cfgUrl" placeholder="Base URL（如 https://api.deepseek.com/v1）">
+      <input class="grow" id="cfgKey" placeholder="API Key" type="password">
+    </div>
+    <button onclick="addConfig()">保存配置</button>
+  </div>
+
+  <!-- 配置列表 -->
+  <div class="card">
+    <h2>② 已有配置</h2>
+    <div id="configList"><div class="muted">加载中…</div></div>
+  </div>
+
+  <!-- 测速 -->
+  <div class="card">
+    <h2>③ 模型测速</h2>
+    <div class="row" style="align-items:flex-end;">
+      <div class="grow">
+        <label class="muted">选择配置</label>
+        <select id="testConfig" onchange="loadModels()"><option value="">-- 选择 --</option></select>
+      </div>
+      <button class="ghost" onclick="loadModels()">拉取模型</button>
+      <button onclick="runTest()">开始测速</button>
+    </div>
+    <div id="modelChips" style="margin:10px 0;"></div>
+    <div id="log"></div>
+    <div id="testImage"></div>
+  </div>
+
+  <!-- 投票记录 -->
+  <div class="card">
+    <h2>④ 投票记录</h2>
+    <div id="pollList"><div class="muted">加载中…</div></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, opts);
+  const text = await res.text();
+  try { return JSON.parse(text); } catch { return { ok: false, raw: text }; }
+}
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent += msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+// ---- 配置 ----
+async function loadConfigs() {
+  const data = await api('/api/configs');
+  const list = document.getElementById('configList');
+  const sel = document.getElementById('testConfig');
+  sel.innerHTML = '<option value="">-- 选择 --</option>';
+  if (!data.configs || data.configs.length === 0) {
+    list.innerHTML = '<div class="muted">暂无配置</div>';
+    return;
+  }
+  list.innerHTML = data.configs.map(c => `
+    <div class="config-item">
+      <div class="meta">
+        <div class="name">${esc(c.name)}</div>
+        <div class="url">${esc(c.base_url)} · key: ${esc(c.api_key)}</div>
+      </div>
+      <button class="danger" onclick="delConfig(${c.id})">删除</button>
+    </div>`).join('');
+  data.configs.forEach(c => {
+    sel.innerHTML += `<option value="${c.id}">${esc(c.name)}</option>`;
+  });
+}
+
+async function addConfig() {
+  const name = document.getElementById('cfgName').value.trim();
+  const base_url = document.getElementById('cfgUrl').value.trim();
+  const api_key = document.getElementById('cfgKey').value.trim();
+  if (!base_url || !api_key) return alert('URL 和 Key 不能为空');
+  const r = await api('/api/configs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name || base_url, base_url, api_key })
+  });
+  if (r.ok) {
+    document.getElementById('cfgName').value = '';
+    document.getElementById('cfgUrl').value = '';
+    document.getElementById('cfgKey').value = '';
+    loadConfigs();
+  } else alert('保存失败: ' + JSON.stringify(r));
+}
+
+async function delConfig(id) {
+  if (!confirm('确认删除该配置？')) return;
+  await api('/api/configs/' + id, { method: 'DELETE' });
+  loadConfigs();
+}
+
+// ---- 模型 ----
+async function loadModels() {
+  const id = document.getElementById('testConfig').value;
+  const chips = document.getElementById('modelChips');
+  chips.innerHTML = '';
+  if (!id) return;
+  log('拉取模型列表…');
+  const r = await api('/api/configs/' + id + '/models');
+  if (r.ok && r.models) {
+    log(`找到 ${r.models.length} 个模型`);
+    chips.innerHTML = r.models.map(m => `<span class="chip">${esc(m)}</span>`).join('');
+  } else {
+    log('拉取失败: ' + JSON.stringify(r));
+  }
+}
+
+async function runTest() {
+  const id = document.getElementById('testConfig').value;
+  if (!id) return alert('请先选择配置');
+  document.getElementById('log').textContent = '';
+  document.getElementById('testImage').innerHTML = '';
+  log('开始测速（随机题、防空回）…可能需要十几秒');
+  const r = await api('/api/configs/' + id + '/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  });
+  if (!r.ok) { log('测速失败: ' + JSON.stringify(r)); return; }
+  renderResults(r.results);
+  if (r.image) {
+    document.getElementById('testImage').innerHTML = `<img src="${r.image}" alt="测速报告">`;
+    log('已生成测速报告图片');
+  } else {
+    log('图片生成未成功（环境缺字体时降级为表格）');
+  }
+}
+
+function renderResults(results) {
+  let html = '<table><tr><th>模型</th><th>状态</th><th>耗时/结果</th></tr>';
+  results.forEach(r => {
+    let badge = r.ok
+      ? '<span class="badge ok">成功</span>'
+      : (r.error && r.error.includes('空回') ? '<span class="badge empty">空回</span>'
+        : (r.error && r.error.includes('超时') ? '<span class="badge fail">超时</span>' : '<span class="badge fail">错误</span>'));
+    let detail = r.ok ? (r.latency_ms + ' ms') : esc((r.error || '').slice(0, 60));
+    html += `<tr><td>${esc(r.model)}</td><td>${badge}</td><td>${detail}</td></tr>`;
+  });
+  html += '</table>';
+  document.getElementById('log').innerHTML = html;
+}
+
+// ---- 投票 ----
+async function loadPolls() {
+  const data = await api('/api/polls');
+  const el = document.getElementById('pollList');
+  if (!data.polls || data.polls.length === 0) {
+    el.innerHTML = '<div class="muted">暂无投票</div>';
+    return;
+  }
+  let html = '<table><tr><th>主题</th><th>目标</th><th>赞成</th><th>反对</th><th>弃权</th><th>状态</th></tr>';
+  data.polls.forEach(p => {
+    const total = p.agree + p.disagree + p.abstain;
+    html += `<tr>
+      <td>${esc(p.topic)}</td>
+      <td>${total}/${p.target_count}</td>
+      <td style="color:#86efac">${p.agree}</td>
+      <td style="color:#fca5a5">${p.disagree}</td>
+      <td style="color:#fbbf24">${p.abstain}</td>
+      <td>${p.status === 'active' ? '进行中' : '已结束'}</td>
+    </tr>`;
+  });
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '"');
+}
+
+// 初始化
+loadConfigs();
+loadPolls();
+</script>
+</body>
+</html>
