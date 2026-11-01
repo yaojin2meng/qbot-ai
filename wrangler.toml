@@ -1,23 +1,36 @@
-name = "qbot-ai"
+name = "qqbot"
+account_id = "75609a64ee5df8b79e19e72dc71febd6"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-09-23"
 
 [build]
 command = "bash build.sh"
 
-# D1 数据库绑定，先执行: wrangler d1 create qbot-db 然后把 id 填进来
 [[d1_databases]]
 binding = "DB"
-database_name = "qbot-db"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_name = "qbot"
+database_id = "c218fba1-3074-4611-8027-be905b19658c"
+migrations_dir = "migrations"
 
-# KV 用于缓存模型测试结果/管理会话(可选)
+# KV 用于 QQ AccessToken 缓存（必需）
 [[kv_namespaces]]
 binding = "KV"
-id = "REPLACE_WITH_YOUR_KV_ID"
+id = "a4fad0f88b3f433199a6c02185705961"
 
 [vars]
-# QQ AppID / AppSecret 通过 wrangler secret 配置，不要明文写这里
-QQ_ENV = "production"
-# 开发调试时可设为 "true" 跳过 Ed25519 签名校验（生产必须为 false 或删除本项）
+# QQ_APP_ID、QQ_APP_SECRET、ADMIN_TOKEN 使用 wrangler secret 配置
+QQ_API_BASE = "https://api.sgroup.qq.com"
 SKIP_SIGNATURE = "false"
+
+# 先创建队列: npx wrangler queues create qqbot-events
+[[queues.producers]]
+binding = "EVENTS"
+queue = "qqbot-events"
+
+[[queues.consumers]]
+queue = "qqbot-events"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 3
+retry_delay = 15
+max_concurrency = 2

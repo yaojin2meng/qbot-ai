@@ -1,12 +1,12 @@
-use worker::*;
 use serde::Deserialize;
+use worker::*;
 
-const OP_DISPATCH: i64 = 0;          // 服务端事件推送
+const OP_DISPATCH: i64 = 0; // 服务端事件推送
 const OP_HTTP_CALLBACK_ACK: i64 = 12; // HTTP 回调模式回包
-const OP_CALLBACK_VERIFY: i64 = 13;   // 回调地址验证
+const OP_CALLBACK_VERIFY: i64 = 13; // 回调地址验证
 
 /// 官方 Payload 结构：{ id, op, d, s, t }
-#[derive(Deserialize)]
+#[derive(serde::Serialize, Deserialize, Clone)]
 struct Payload {
     op: i64,
     #[serde(default)]
@@ -22,7 +22,7 @@ struct Payload {
 }
 
 /// GROUP_AT_MESSAGE_CREATE 事件体（字段名严格按官方文档）
-#[derive(Deserialize)]
+#[derive(serde::Serialize, Deserialize, Clone)]
 pub struct GroupAtMessage {
     pub id: String,
     pub content: String,
@@ -33,7 +33,7 @@ pub struct GroupAtMessage {
     pub message_scene: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Serialize, Deserialize, Clone)]
 pub struct Author {
     #[serde(default)]
     pub id: String,
@@ -48,11 +48,11 @@ pub struct Author {
 }
 
 /// INTERACTION_CREATE 事件体（字段名严格按官方文档）
-#[derive(Deserialize)]
+#[derive(serde::Serialize, Deserialize, Clone)]
 pub struct InteractionCreate {
-    pub id: String,                    // interaction_id，用于 PUT 回应 + 被动回复
+    pub id: String, // interaction_id，用于 PUT 回应 + 被动回复
     #[serde(rename = "type", default)]
-    pub kind: i64,                     // 11=消息按钮 12=快捷菜单 13=反馈 ...
+    pub kind: i64, // 11=消息按钮 12=快捷菜单 13=反馈 ...
     #[serde(default)]
     #[allow(dead_code)]
     pub scene: Option<String>,
@@ -66,7 +66,7 @@ pub struct InteractionCreate {
     pub data: Option<InteractionData>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Serialize, Deserialize, Clone)]
 pub struct InteractionData {
     #[serde(rename = "type", default)]
     #[allow(dead_code)]
@@ -75,7 +75,7 @@ pub struct InteractionData {
     pub resolved: Option<InteractionResolved>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Serialize, Deserialize, Clone)]
 pub struct InteractionResolved {
     #[serde(default)]
     pub button_data: Option<String>,
@@ -85,194 +85,294 @@ pub struct InteractionResolved {
 }
 
 pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    // ---------- 1. 读取 body + header ----------
-    let sig_hex = req.headers().get("X-Signature-Ed25519")?.unwrap_or_default();
-    let ts = req.headers().get("X-Signature-Timestamp")?.unwrap_or_default();
+    let sig_hex = req
+        .headers()
+        .get("X-Signature-Ed25519")?
+        .unwrap_or_default();
+    let ts = req
+        .headers()
+        .get("X-Signature-Timestamp")?
+        .unwrap_or_default();
     let body = req.text().await?;
-
-    // ---------- 2. 签名校验（Ed25519）----------
-    // 官方：msg = timestamp + body；seed = AppSecret 重复至 32 字节
-    // 开发阶段可设变量 SKIP_SIGNATURE=true 跳过（生产不建议）
+    if body.len() > 64 * 1024 {
+        return Response::error("payload too large", 413);
+    }
     let skip = ctx
         .var("SKIP_SIGNATURE")
-        .map(|v| v.to_string())
-        .unwrap_or_default()
-        == "true";
+        .map(|v| v.to_string() == "true")
+        .unwrap_or(false);
     if !skip {
-        if sig_hex.is_empty() || ts.is_empty() {
-            return Response::error("missing signature headers", 401);
+        let now = Date::now().as_millis() as i64 / 1000;
+        if !timestamp_is_fresh(&ts, now) || !verify_signature(&ctx.env, &sig_hex, &ts, &body)? {
+            return Response::error("invalid or expired signature", 401);
         }
-        if !verify_signature(&ctx, &sig_hex, &ts, &body)? {
-            return Response::error("invalid signature", 401);
-        }
+    } else {
+        console_error!("WARNING: QQ signature verification is disabled");
     }
-
     let payload: Payload = match serde_json::from_str(&body) {
         Ok(p) => p,
         Err(_) => return Response::error("bad payload", 400),
     };
-
-    // ---------- 3. 回调地址验证 op=13 ----------
-    // 官方要求返回 { plain_token, signature }，signature = hex(Ed25519(event_ts + plain_token))
     if payload.op == OP_CALLBACK_VERIFY {
-        if let Some(d) = &payload.d {
-            let plain = d.get("plain_token").and_then(|v| v.as_str()).unwrap_or("");
-            let event_ts = d.get("event_ts").and_then(|v| v.as_str()).unwrap_or("");
-            let signature = sign_validation(&ctx, event_ts, plain)?;
-            return Response::from_json(&serde_json::json!({
-                "plain_token": plain,
-                "signature": signature
-            }));
+        let d = payload.d.as_ref();
+        let plain = d
+            .and_then(|d| d.get("plain_token"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let event_ts = d
+            .and_then(|d| d.get("event_ts"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if plain.is_empty() || event_ts.is_empty() {
+            return Response::error("invalid challenge", 400);
         }
+        return Response::from_json(&serde_json::json!({
+            "plain_token": plain,
+            "signature": sign_validation(&ctx.env, event_ts, plain)?
+        }));
     }
-
-    // ---------- 4. 事件派发 op=0 ----------
     if payload.op == OP_DISPATCH {
-        let event_type = payload.t.clone().unwrap_or_default();
-        if let Some(d) = payload.d {
-            match event_type.as_str() {
-                "GROUP_AT_MESSAGE_CREATE" => {
-                    if let Ok(evt) = serde_json::from_value::<GroupAtMessage>(d) {
-                        // 相同 msg_id 可能重复推送，用 KV 去重（5 分钟）
-                        if !is_duplicate(&ctx, &format!("gmsg:{}", evt.id)).await {
-                            let _ = handle_group_message(evt, &ctx).await;
-                        }
+        let d = payload.d.unwrap_or(serde_json::Value::Null);
+        let job = match payload.t.as_deref().unwrap_or("") {
+            "GROUP_AT_MESSAGE_CREATE" => {
+                let event = match serde_json::from_value::<GroupAtMessage>(d) {
+                    Ok(e)
+                        if crate::qq_api::valid_id(&e.id)
+                            && crate::qq_api::valid_id(&e.group_openid) =>
+                    {
+                        e
+                    }
+                    _ => return Response::error("invalid group event", 400),
+                };
+                Some(EventJob::Group { event })
+            }
+            "INTERACTION_CREATE" => {
+                let event: InteractionCreate = match serde_json::from_value(d) {
+                    Ok(e) => e,
+                    Err(_) => return Response::error("invalid interaction event", 400),
+                };
+                if !crate::qq_api::valid_id(&event.id) {
+                    return Response::error("invalid interaction id", 400);
+                }
+                if event.kind == 11 || event.kind == 12 {
+                    if crate::qq_api::ack_interaction(&ctx.env, &event.id)
+                        .await
+                        .is_err()
+                    {
+                        console_error!("interaction acknowledgement failed");
+                        // Redeliveries may report 'already acknowledged'; still enqueue the business event.
                     }
                 }
-                "INTERACTION_CREATE" => {
-                    if let Ok(evt) = serde_json::from_value::<InteractionCreate>(d) {
-                        // 相同 interaction id 只处理一次
-                        if !is_duplicate(&ctx, &format!("intr:{}", evt.id)).await {
-                            let _ = handle_interaction(evt, &ctx).await;
-                        }
+                if event.kind == 11 {
+                    let event_id = payload.id.unwrap_or_default();
+                    if !crate::qq_api::valid_id(&event_id) {
+                        return Response::error("missing outer event id", 400);
                     }
+                    Some(EventJob::Interaction { event, event_id })
+                } else {
+                    None
                 }
-                _ => {}
+            }
+            _ => None,
+        };
+        if let Some(job) = job {
+            // Durable enqueue before ACK. Enqueue failure must be retried by QQ.
+            if ctx.env.queue("EVENTS")?.send(job).await.is_err() {
+                console_error!("QQ event enqueue failed");
+                return Response::error("queue unavailable", 503);
             }
         }
     }
-
-    // ---------- 5. HTTP 回调 ACK (op=12) ----------
     Response::from_json(&serde_json::json!({ "op": OP_HTTP_CALLBACK_ACK }))
 }
 
-/// 校验 Ed25519 签名
-fn verify_signature(ctx: &RouteContext<()>, sig_hex: &str, ts: &str, body: &str) -> Result<bool> {
-    use ed25519_dalek::{Signature, Verifier};
+#[derive(serde::Serialize, Deserialize, Clone)]
+#[serde(tag = "kind")]
+pub enum EventJob {
+    Group {
+        event: GroupAtMessage,
+    },
+    Interaction {
+        event: InteractionCreate,
+        event_id: String,
+    },
+}
 
-    let secret = ctx.secret("QQ_APP_SECRET")?.to_string();
-    let seed = build_seed(&secret);
-
-    let mut msg = Vec::new();
-    msg.extend_from_slice(ts.as_bytes());
-    msg.extend_from_slice(body.as_bytes());
-
-    let sig_bytes = match hex::decode(sig_hex) {
-        Ok(b) if b.len() == 64 => b,
-        _ => return Ok(false),
+pub async fn process_job(job: &EventJob, env: &Env) -> Result<()> {
+    let key = match job {
+        EventJob::Group { event } => format!("gmsg:{}:{}", event.group_openid, event.id),
+        EventJob::Interaction { event, .. } => format!("intr:{}", event.id),
     };
-    let sig_arr: [u8; 64] = match sig_bytes.try_into() {
-        Ok(a) => a,
+    let db = env.d1("DB")?;
+    if db
+        .prepare("SELECT event_key FROM webhook_events WHERE event_key=?1")
+        .bind(&[key.clone().into()])?
+        .first::<String>(Some("event_key"))
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let owner = crate::security::acquire(env, &key, 600)
+        .await?
+        .ok_or_else(|| Error::from("event is already processing"))?;
+    let result = async {
+        if db
+            .prepare("SELECT event_key FROM webhook_events WHERE event_key=?1")
+            .bind(&[key.clone().into()])?
+            .first::<String>(Some("event_key"))
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        match job {
+            EventJob::Group { event } => handle_group_message(event, env).await?,
+            EventJob::Interaction { event, event_id } => {
+                handle_interaction(event, event_id, env).await?
+            }
+        }
+        db.prepare(
+            "INSERT OR IGNORE INTO webhook_events (event_key, completed_at) VALUES (?1, ?2)",
+        )
+        .bind(&[key.clone().into(), (Date::now().as_millis() as i64).into()])?
+        .run()
+        .await?;
+        if rand::random::<u8>() % 32 == 0 {
+            db.prepare("DELETE FROM webhook_events WHERE completed_at < ?1")
+                .bind(&[(Date::now().as_millis() as i64 - 7 * 86400000).into()])?
+                .run()
+                .await?;
+            db.prepare("DELETE FROM task_leases WHERE expires_at < ?1")
+                .bind(&[(Date::now().as_millis() as i64 - 86400000).into()])?
+                .run()
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if crate::security::release(env, &key, &owner).await.is_err() {
+        console_error!("event lease release failed");
+    }
+    result
+}
+
+fn timestamp_is_fresh(ts: &str, now: i64) -> bool {
+    ts.parse::<i64>()
+        .map(|ts| now.abs_diff(ts) <= 300)
+        .unwrap_or(false)
+}
+
+fn verify_signature(env: &Env, sig_hex: &str, ts: &str, body: &str) -> Result<bool> {
+    let seed = build_seed(&env.secret("QQ_APP_SECRET")?.to_string())?;
+    let bytes = match hex::decode(sig_hex) {
+        Ok(bytes) => bytes,
         Err(_) => return Ok(false),
     };
-    let sig = Signature::from_bytes(&sig_arr);
-
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
-    let verifying_key = signing_key.verifying_key();
-    Ok(verifying_key.verify(&msg, &sig).is_ok())
+    let sig = match ed25519_dalek::Signature::from_slice(&bytes) {
+        Ok(sig) => sig,
+        Err(_) => return Ok(false),
+    };
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+    Ok(key
+        .verify_strict(format!("{ts}{body}").as_bytes(), &sig)
+        .is_ok())
 }
 
-/// 生成回调地址验证签名：hex(Ed25519(event_ts + plain_token))
-fn sign_validation(ctx: &RouteContext<()>, event_ts: &str, plain_token: &str) -> Result<String> {
+fn sign_validation(env: &Env, ts: &str, plain: &str) -> Result<String> {
     use ed25519_dalek::Signer;
-
-    let secret = ctx.secret("QQ_APP_SECRET")?.to_string();
-    let seed = build_seed(&secret);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
-
-    let mut msg = Vec::new();
-    msg.extend_from_slice(event_ts.as_bytes());
-    msg.extend_from_slice(plain_token.as_bytes());
-    let sig = signing_key.sign(&msg);
-    Ok(hex::encode(sig.to_bytes()))
+    let seed = build_seed(&env.secret("QQ_APP_SECRET")?.to_string())?;
+    Ok(hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+            .sign(format!("{ts}{plain}").as_bytes())
+            .to_bytes(),
+    ))
 }
 
-/// AppSecret 重复拼接至 32 字节作为 seed（严格按官方 Go 示例逻辑）
-fn build_seed(secret: &str) -> [u8; 32] {
-    let mut s = secret.to_string();
-    while s.len() < 32 {
-        s = format!("{}{}", s, s);
+fn build_seed(secret: &str) -> Result<[u8; 32]> {
+    if secret.is_empty() {
+        return Err(Error::from("QQ_APP_SECRET must not be empty"));
     }
-    let bytes = s.as_bytes();
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&bytes[..32]);
-    seed
+    let mut seed = [0; 32];
+    for (i, byte) in seed.iter_mut().enumerate() {
+        *byte = secret.as_bytes()[i % secret.len()];
+    }
+    Ok(seed)
 }
 
-/// KV 去重：键已存在返回 true；否则写入并返回 false
-async fn is_duplicate(ctx: &RouteContext<()>, key: &str) -> bool {
-    if let Ok(kv) = ctx.env.kv("KV") {
-        if let Ok(Some(_)) = kv.get(key).text().await {
-            return true;
+fn strip_mention(text: &str) -> &str {
+    let text = text.trim();
+    if text.starts_with("<@") {
+        if let Some(end) = text.find('>') {
+            return text[end + 1..].trim();
         }
-        let _ = kv
-            .put(key, "1")
-            .and_then(|b| b.expiration_ttl(300))
-            .and_then(|b| b.execute())
-            .await;
     }
-    false
+    text
 }
 
-/// 处理群 @消息：识别「投票 <主题> <人数>」指令，或识别 API+Key 自动测速出图
-async fn handle_group_message(evt: GroupAtMessage, ctx: &RouteContext<()>) -> Result<()> {
-    let text = evt.content.trim().to_string(); // 官方已自动去除 @ 前缀
-
-    // 1. 检查是否为投票指令
-    if let Some((topic, target)) = crate::poll::parse_vote_command(&text) {
-        let member = evt
-            .author
-            .member_openid
-            .clone()
-            .unwrap_or_else(|| evt.author.id.clone());
-        crate::poll::create_poll(ctx, &evt.group_openid, &evt.id, &member, &topic, target).await?;
-        return Ok(());
+async fn handle_group_message(event: &GroupAtMessage, env: &Env) -> Result<()> {
+    let text = strip_mention(&event.content);
+    if let Some((topic, count)) = crate::poll::parse_vote_command(text) {
+        return crate::poll::create_poll(env, &event.group_openid, &event.id, &topic, count).await;
     }
-
-    // 2. 检查是否为 API + Key 配置（格式一: NewAPI JSON, 格式二: 换行/包含 url+key 的文本）
-    if let Some((url, key)) = crate::model_test::extract_api_and_key(&text) {
-        crate::model_test::test_and_reply_group(ctx, &evt.group_openid, &evt.id, &url, &key).await?;
-        return Ok(());
+    if let Some((base, key)) = crate::model_test::extract_api_and_key(text) {
+        let lease_key = format!("group-test:{}", event.group_openid);
+        if let Some(owner) = crate::security::acquire(env, &lease_key, 600).await? {
+            let result = crate::model_test::test_and_reply_group(
+                env,
+                &event.group_openid,
+                &event.id,
+                &base,
+                &key,
+            )
+            .await;
+            if result.is_err() {
+                crate::security::release(env, &lease_key, &owner).await?;
+            }
+            return result;
+        }
+        crate::qq_api::send_group(env, &event.group_openid, serde_json::json!({
+            "msg_type": 0, "content": "本群测速正在进行或处于冷却期，请 10 分钟后重试。", "msg_id": event.id, "msg_seq": 1
+        })).await?;
     }
-
     Ok(())
 }
 
-/// 处理按钮点击：必须先 PUT 回应 ACK，再执行业务
-async fn handle_interaction(evt: InteractionCreate, ctx: &RouteContext<()>) -> Result<()> {
-    // 仅 type=11（消息按钮）需要 PUT 回应，否则客户端一直 loading
-    if evt.kind == 11 {
-        let _ = crate::poll::ack_interaction(ctx, &evt.id).await;
-    } else {
+async fn handle_interaction(event: &InteractionCreate, event_id: &str, env: &Env) -> Result<()> {
+    let user = event
+        .group_member_openid
+        .as_deref()
+        .or(event.user_openid.as_deref())
+        .unwrap_or("");
+    let group = event.group_openid.as_deref().unwrap_or("");
+    if !crate::qq_api::valid_id(user) || !crate::qq_api::valid_id(group) {
         return Ok(());
     }
-
-    let user = evt
-        .group_member_openid
-        .clone()
-        .or(evt.user_openid.clone())
-        .unwrap_or_default();
-    let group = evt.group_openid.clone().unwrap_or_default();
-
-    let btn_data = evt
+    let data = event
         .data
         .as_ref()
         .and_then(|d| d.resolved.as_ref())
-        .and_then(|r| r.button_data.clone())
-        .unwrap_or_default();
+        .and_then(|r| r.button_data.as_deref())
+        .unwrap_or("");
+    crate::poll::handle_vote_click(env, group, user, data, event_id).await
+}
 
-    if !btn_data.is_empty() {
-        crate::poll::handle_vote_click(ctx, &group, &user, &btn_data, &evt.id).await?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::Signer;
+    #[test]
+    fn official_signature_example() {
+        let seed = build_seed("DG5g3B4j9X2KOErG").unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        assert_eq!(hex::encode(key.sign(b"1725442341Arq0D5A61EgUu4OxUvOp").to_bytes()),
+            "87befc99c42c651b3aac0278e71ada338433ae26fcb24307bdc5ad38c1adc2d01bcfcadc0842edac85e85205028a1132afe09280305f13aa6909ffc2d652c706");
     }
-    Ok(())
+    #[test]
+    fn timestamps_and_mentions() {
+        assert!(timestamp_is_fresh("1000", 1300));
+        assert!(!timestamp_is_fresh("1000", 1301));
+        assert!(!timestamp_is_fresh("bad", 1300));
+        assert_eq!(strip_mention("<@!123> 投票 测试 2"), "投票 测试 2");
+    }
 }

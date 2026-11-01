@@ -1,6 +1,11 @@
+use futures_util::{stream, StreamExt};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use worker::*;
-use serde::Deserialize;
-use serde_json::json;
+
+const MAX_MODELS: usize = 30;
+const CONCURRENCY: usize = 5;
+const REQUEST_TIMEOUT: u64 = 15;
 
 #[derive(Deserialize)]
 struct ConfigRow {
@@ -8,7 +13,6 @@ struct ConfigRow {
     base_url: String,
     api_key: String,
 }
-
 #[derive(Deserialize)]
 struct TestBody {
     models: Option<Vec<String>>,
@@ -18,347 +22,330 @@ fn now_ms() -> i64 {
     Date::now().as_millis() as i64
 }
 
-/// 识别文本中的 API 与 Key：
-/// 1. 识别 JSON: {"_type":"newapi_channel_conn","key":"sk-xxx","url":"https://ai.apizn.com"}
-/// 2. 识别两行/混合文本：url 和 key
-pub fn extract_api_and_key(text: &str) -> Option<(String, String)> {
-    let trimmed = text.trim();
+/// A bare origin uses /v1. Explicit versioned/custom API paths are preserved.
+/// HTTPS only; prohibit literal IPs, userinfo, query/fragment and local-only names.
+pub fn normalize_base_url(input: &str) -> Result<String> {
+    if input.len() > 2048 {
+        return Err(Error::from("API URL too long"));
+    }
+    let mut url = Url::parse(input.trim()).map_err(|_| Error::from("invalid API URL"))?;
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.port().is_some_and(|p| p != 443)
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || host.starts_with('[')
+        || !host.contains('.')
+        || host.ends_with('.')
+        || [".localhost", ".local", ".internal", ".test", ".invalid"]
+            .iter()
+            .any(|s| host.ends_with(s))
+    {
+        return Err(Error::from(
+            "only public HTTPS API origins without credentials are allowed",
+        ));
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(if path.is_empty() { "/v1" } else { &path });
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
 
-    // 格式一：JSON 格式 (支持周围有文字时截取 {...})
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+fn config_pair(url: &str, key: &str) -> Option<(String, String)> {
+    let key = key.trim();
+    if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control) {
+        return None;
+    }
+    Some((normalize_base_url(url).ok()?, key.to_string()))
+}
+
+/// JSON, two labelled lines, or a URL and key separated by whitespace.
+pub fn extract_api_and_key(text: &str) -> Option<(String, String)> {
+    let text = text.trim();
+    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
         if start < end {
-            let json_str = &trimmed[start..=end];
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                let url = val.get("url").or_else(|| val.get("base_url")).and_then(|v| v.as_str());
-                let key = val.get("key").or_else(|| val.get("api_key")).and_then(|v| v.as_str());
-                if let (Some(u), Some(k)) = (url, key) {
-                    if !u.trim().is_empty() && !k.trim().is_empty() {
-                        return Some((u.trim().trim_end_matches('/').to_string(), k.trim().to_string()));
-                    }
+            if let Ok(v) = serde_json::from_str::<Value>(&text[start..=end]) {
+                let url = v
+                    .get("url")
+                    .or_else(|| v.get("base_url"))
+                    .and_then(Value::as_str);
+                let key = v
+                    .get("key")
+                    .or_else(|| v.get("api_key"))
+                    .and_then(Value::as_str);
+                if let (Some(url), Some(key)) = (url, key) {
+                    return config_pair(url, key);
                 }
             }
         }
     }
-
-    // 格式二：按行提取 url 和 key（支持带有 url: / key: 标签）
-    let mut detected_url: Option<String> = None;
-    let mut detected_key: Option<String> = None;
-
-    for line in trimmed.lines() {
-        let l = line.trim();
-        if l.is_empty() {
-            continue;
-        }
-
-        let lower = l.to_lowercase();
-        let cleaned = if lower.starts_with("url:") || lower.starts_with("url=") {
-            l[4..].trim()
-        } else if lower.starts_with("key:") || lower.starts_with("key=") {
-            l[4..].trim()
-        } else if lower.starts_with("api_key:") || lower.starts_with("api_key=") {
-            l[8..].trim()
-        } else if lower.starts_with("base_url:") || lower.starts_with("base_url=") {
-            l[9..].trim()
-        } else {
-            l
-        };
-
-        if cleaned.starts_with("http://") || cleaned.starts_with("https://") {
-            if detected_url.is_none() {
-                detected_url = Some(cleaned.trim_end_matches('/').to_string());
-            }
-        } else if cleaned.starts_with("sk-") || (!cleaned.contains("://") && cleaned.len() >= 16) {
-            if detected_key.is_none() {
-                detected_key = Some(cleaned.to_string());
-            }
-        }
-    }
-
-    if let (Some(u), Some(k)) = (detected_url, detected_key) {
-        return Some((u, k));
-    }
-
-    // 格式三：同一行由空格分隔 "https://xxx sk-xxx"
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    let parts: Vec<_> = text.split_whitespace().collect();
     if parts.len() == 2 {
-        if parts[0].starts_with("http://") || parts[0].starts_with("https://") {
-            return Some((parts[0].trim_end_matches('/').to_string(), parts[1].to_string()));
-        } else if parts[1].starts_with("http://") || parts[1].starts_with("https://") {
-            return Some((parts[1].trim_end_matches('/').to_string(), parts[0].to_string()));
+        if parts[0].starts_with("https://") {
+            return config_pair(parts[0], parts[1]);
+        }
+        if parts[1].starts_with("https://") {
+            return config_pair(parts[1], parts[0]);
         }
     }
-
-    None
+    let mut url = None;
+    let mut key = None;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let lower = line.to_ascii_lowercase();
+        let mut value = line;
+        let mut key_label = false;
+        for label in [
+            "url:",
+            "url=",
+            "base_url:",
+            "base_url=",
+            "key:",
+            "key=",
+            "api_key:",
+            "api_key=",
+        ] {
+            if lower.starts_with(label) {
+                value = line[label.len()..].trim();
+                key_label = label.starts_with("key") || label.starts_with("api_key");
+                break;
+            }
+        }
+        if value.starts_with("https://") && url.is_none() {
+            url = Some(value);
+        } else if (key_label || value.starts_with("sk-"))
+            && !value.contains(char::is_whitespace)
+            && key.is_none()
+        {
+            key = Some(value);
+        }
+    }
+    config_pair(url?, key?)
 }
 
-/// 群内收到 API 配置时自动执行测速并回复群聊（防空回、生成测试图）
 pub async fn test_and_reply_group(
-    ctx: &RouteContext<()>,
-    group_id: &str,
-    msg_id: &str,
-    base_url: &str,
-    api_key: &str,
+    env: &Env,
+    group: &str,
+    msg: &str,
+    base: &str,
+    key: &str,
 ) -> Result<()> {
-    // 1. 先回复一条正在测试的消息提示
-    let hint_payload = json!({
-        "msg_type": 2,
-        "markdown": {
-            "content": format!("🔍 **已识别 API 配置**\n\n> URL: `{}`\n\n⏳ 正在拉取可用模型并进行防空回随机测速，请稍候...", base_url)
-        },
-        "msg_id": msg_id,
-        "msg_seq": 1
-    });
-    let _ = send_group_payload(ctx, group_id, hint_payload).await;
-
-    // 2. 拉取所有模型
-    let models = match fetch_model_list(base_url, api_key).await {
-        Ok(m) if !m.is_empty() => m,
-        Ok(_) => {
-            let err_payload = json!({
-                "msg_type": 2,
-                "markdown": { "content": format!("⚠️ 未在该接口检索到可用模型列表（/v1/models 返回空）。") },
-                "msg_id": msg_id,
-                "msg_seq": 2
-            });
-            let _ = send_group_payload(ctx, group_id, err_payload).await;
-            return Ok(());
-        }
-        Err(e) => {
-            let err_payload = json!({
-                "msg_type": 2,
-                "markdown": { "content": format!("❌ 拉取模型列表失败: {}", e) },
-                "msg_id": msg_id,
-                "msg_seq": 2
-            });
-            let _ = send_group_payload(ctx, group_id, err_payload).await;
-            return Ok(());
+    let base = normalize_base_url(base)?;
+    // The progress message is optional; failure is logged, not mistaken for successful delivery.
+    if crate::qq_api::send_group(
+        env,
+        group,
+        json!({
+            "msg_type": 0, "content": "已识别 API，正在测速（最多 30 个模型，单个超时 15 秒）。",
+            "msg_id": msg, "msg_seq": 1
+        }),
+    )
+    .await
+    .is_err()
+    {
+        console_error!("QQ test progress message failed");
+    }
+    let models = match fetch_model_list(&base, key).await {
+        Ok(models) if !models.is_empty() => models,
+        _ => {
+            return crate::qq_api::send_group(env, group, json!({
+                "msg_type": 0, "content": "拉取模型失败或列表为空，请检查 API Base URL、Key 与接口权限。",
+                "msg_id": msg, "msg_seq": 2
+            })).await;
         }
     };
-
-    // 3. 并发测试模型（最多取 30 个）
-    let mut results: Vec<ModelResult> = Vec::new();
-    let mut handles = Vec::new();
-    for model in models.into_iter().take(30) {
-        let base = base_url.to_string();
-        let key = api_key.to_string();
-        let m = model.clone();
-        handles.push(async move { test_one(0, &base, &key, &m).await });
-    }
-    for h in handles {
-        results.push(h.await);
-    }
-
-    // 4. 生成测速结果报告图
-    let png_bytes = crate::render::render_results_png_bytes(&results);
-
-    // 5. 优先通过 QQ 群富媒体发送图片；若未开通图片权限则发送精美 Markdown 汇总
-    let sent_image = if let Some(bytes) = png_bytes {
-        upload_and_send_group_image(ctx, group_id, msg_id, bytes).await.is_ok()
-    } else {
-        false
-    };
-
-    if !sent_image {
-        // 降级为 Markdown 表格发送
-        let mut md = format!("# 📊 模型测速报告\n\n> URL: `{}`\n\n| 模型 | 状态 | 耗时/错误 |\n|---|---|---|\n", base_url);
-        for r in &results {
-            let status = if r.ok {
-                "✅ 成功"
-            } else if r.error.as_deref().map(|e| e.contains("空回")).unwrap_or(false) {
-                "⚠️ 空回"
-            } else if r.error.as_deref().map(|e| e.contains("超时")).unwrap_or(false) {
-                "⏱️ 超时"
-            } else {
-                "❌ 错误"
-            };
-            let detail = if r.ok {
-                format!("{} ms", r.latency_ms.unwrap_or(0))
-            } else {
-                r.error.clone().unwrap_or_default()
-            };
-            md.push_str(&format!("| {} | {} | {} |\n", r.model, status, detail));
+    let results = test_models(0, &base, key, models).await;
+    if let Some(bytes) = crate::render::render_results_png_bytes(&results) {
+        match upload_and_send_group_image(env, group, msg, bytes).await {
+            Ok(()) => return Ok(()),
+            Err(_) => console_error!("QQ test image upload/send failed; using text fallback"),
         }
-        let reply_payload = json!({
-            "msg_type": 2,
-            "markdown": { "content": md },
-            "msg_id": msg_id,
-            "msg_seq": 3
-        });
-        let _ = send_group_payload(ctx, group_id, reply_payload).await;
     }
-
-    Ok(())
+    // Plain text needs fewer QQ permissions and avoids Markdown injection by upstream model names.
+    let mut report = String::from("模型测速报告\n");
+    for r in &results {
+        let detail = if r.ok {
+            format!("{} ms", r.latency_ms.unwrap_or(0))
+        } else {
+            r.error.clone().unwrap_or_else(|| "失败".into())
+        };
+        report.push_str(&format!("{}: {}\n", truncate(&r.model, 60), detail));
+    }
+    crate::qq_api::send_group(
+        env,
+        group,
+        json!({
+            "msg_type": 0, "content": report, "msg_id": msg, "msg_seq": 3
+        }),
+    )
+    .await
 }
 
-/// 上传富媒体文件并发送群图片
 async fn upload_and_send_group_image(
-    ctx: &RouteContext<()>,
-    group_id: &str,
-    msg_id: &str,
-    png_bytes: Vec<u8>,
+    env: &Env,
+    group: &str,
+    msg: &str,
+    bytes: Vec<u8>,
 ) -> Result<()> {
-    let token = crate::poll::get_access_token(ctx).await?;
-    let upload_url = format!("https://api.sgroup.qq.com/v2/groups/{}/files", group_id);
-
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let b64_file = STANDARD.encode(&png_bytes);
-
-    let upload_body = json!({
-        "file_type": 1, // 1: 图片
-        "file_data": b64_file,
-        "srv_send_msg": false
-    });
-
-    let headers = Headers::new();
-    headers.set("Authorization", &format!("QQBot {}", token))?;
-    headers.set("Content-Type", "application/json")?;
-
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_headers(headers)
-        .with_body(Some(upload_body.to_string().into()));
-
-    let req = Request::new_with_init(&upload_url, &init)?;
-    let mut resp = Fetch::Request(req).send().await?;
-    let resp_json: serde_json::Value = resp.json().await?;
-
-    let file_info = resp_json
+    let value = crate::qq_api::request(
+        env,
+        Method::Post,
+        &format!("/v2/groups/{group}/files"),
+        json!({
+            "file_type": 1, "file_data": STANDARD.encode(bytes), "srv_send_msg": false
+        }),
+    )
+    .await?;
+    let info = value
         .get("file_info")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::from("file_info not returned from upload"))?;
-
-    // 发送富媒体消息 (msg_type=7)
-    let msg_payload = json!({
-        "msg_type": 7,
-        "media": {
-            "file_info": file_info
-        },
-        "msg_id": msg_id,
-        "msg_seq": 2
-    });
-    send_group_payload(ctx, group_id, msg_payload).await?;
-    Ok(())
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::from("QQ file upload returned no file_info"))?;
+    crate::qq_api::send_group(
+        env,
+        group,
+        json!({
+            "msg_type": 7, "media": {"file_info": info}, "msg_id": msg, "msg_seq": 2
+        }),
+    )
+    .await
 }
 
-async fn send_group_payload(
-    ctx: &RouteContext<()>,
-    group_id: &str,
-    payload: serde_json::Value,
-) -> Result<()> {
-    let token = crate::poll::get_access_token(ctx).await?;
-    let url = format!("https://api.sgroup.qq.com/v2/groups/{}/messages", group_id);
-
-    let headers = Headers::new();
-    headers.set("Authorization", &format!("QQBot {}", token))?;
-    headers.set("Content-Type", "application/json")?;
-
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_headers(headers)
-        .with_body(Some(payload.to_string().into()));
-
-    let req = Request::new_with_init(&url, &init)?;
-    let _ = Fetch::Request(req).send().await?;
-    Ok(())
+fn route_id(ctx: &RouteContext<()>) -> Option<i64> {
+    ctx.param("id")
+        .and_then(|s| s.parse().ok())
+        .filter(|id| *id > 0)
 }
 
-/// GET /api/configs/:id/models —— Web UI 端拉取模型
+async fn load_config(env: &Env, id: i64) -> Result<Option<ConfigRow>> {
+    env.d1("DB")?
+        .prepare("SELECT id, base_url, api_key FROM api_configs WHERE id=?1")
+        .bind(&[id.into()])?
+        .first(None)
+        .await
+}
+
 pub async fn list_models(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    let id: i64 = ctx.param("id").unwrap().parse().unwrap_or(0);
-    let db = ctx.env.d1("DB")?;
-    let cfg = db
-        .prepare("SELECT id, base_url, api_key FROM api_configs WHERE id = ?1")
-        .bind(&[id.into()])?
-        .first::<ConfigRow>(None)
-        .await?;
-
-    let cfg = match cfg {
+    let id = match route_id(&ctx) {
+        Some(id) => id,
+        None => return Response::error("invalid id", 400),
+    };
+    let cfg = match load_config(&ctx.env, id).await? {
         Some(c) => c,
         None => return Response::error("config not found", 404),
     };
-
-    let models = fetch_model_list(&cfg.base_url, &cfg.api_key).await?;
-    Response::from_json(&json!({ "ok": true, "models": models }))
+    match fetch_model_list(&cfg.base_url, &cfg.api_key).await {
+        Ok(models) => Response::from_json(&json!({"ok": true, "models": models})),
+        Err(_) => Response::error("上游模型列表请求失败，请检查地址、Key 和权限", 502),
+    }
 }
 
-/// POST /api/configs/:id/test —— Web UI 端并发测速
 pub async fn run_test(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    let id: i64 = ctx.param("id").unwrap().parse().unwrap_or(0);
-    let db = ctx.env.d1("DB")?;
-    let cfg = db
-        .prepare("SELECT id, base_url, api_key FROM api_configs WHERE id = ?1")
-        .bind(&[id.into()])?
-        .first::<ConfigRow>(None)
-        .await?;
-    let cfg = match cfg {
+    let id = match route_id(&ctx) {
+        Some(id) => id,
+        None => return Response::error("invalid id", 400),
+    };
+    let cfg = match load_config(&ctx.env, id).await? {
         Some(c) => c,
         None => return Response::error("config not found", 404),
     };
-
-    let body: TestBody = req.json().await.unwrap_or(TestBody { models: None });
-    let models = match body.models {
-        Some(m) if !m.is_empty() => m,
-        _ => fetch_model_list(&cfg.base_url, &cfg.api_key).await?,
+    let body: TestBody = match req.json().await {
+        Ok(body) => body,
+        Err(_) => return Response::error("invalid JSON", 400),
     };
-
-    let mut results: Vec<ModelResult> = Vec::new();
-    let mut handles = Vec::new();
-
-    for model in models.into_iter().take(30) {
-        let base = cfg.base_url.clone();
-        let key = cfg.api_key.clone();
-        let cfg_id = cfg.id;
-        let m = model.clone();
-        handles.push(async move { test_one(cfg_id, &base, &key, &m).await });
+    if body.models.as_ref().is_some_and(|models| {
+        models.len() > MAX_MODELS || models.iter().any(|m| m.is_empty() || m.len() > 200)
+    }) {
+        return Response::error("最多 30 个模型，模型名称长度为 1..200 字节", 400);
     }
-
-    for h in handles {
-        let r = h.await;
-        let _ = db
-            .prepare(
-                "INSERT INTO model_tests (config_id, model, ok, latency_ms, error, prompt, answer, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            )
-            .bind(&[
-                r.config_id.into(),
-                r.model.clone().into(),
-                (r.ok as i64).into(),
-                r.latency_ms.into(),
-                r.error.clone().unwrap_or_default().into(),
-                r.prompt.clone().into(),
-                r.answer.clone().into(),
-                now_ms().into(),
-            ])?
-            .run()
-            .await;
-        results.push(r);
+    let lease_key = format!("web-test:{id}");
+    let owner = match crate::security::acquire(&ctx.env, &lease_key, 600).await? {
+        Some(owner) => owner,
+        None => return Response::error("该配置正在测速或处于冷却期，请稍后重试", 429),
+    };
+    let result = run_config_test(&ctx.env, cfg, body).await;
+    // Successful tests keep a cooldown lease to prevent accidentally burning API credits.
+    if result.is_err()
+        && crate::security::release(&ctx.env, &lease_key, &owner)
+            .await
+            .is_err()
+    {
+        console_error!("test lease release failed");
     }
+    result
+}
 
-    let png_data_url = crate::render::render_results_png(&results);
-
+async fn run_config_test(env: &Env, cfg: ConfigRow, body: TestBody) -> Result<Response> {
+    let base = normalize_base_url(&cfg.base_url)?;
+    let models = match body.models {
+        Some(models) if !models.is_empty() => models,
+        _ => fetch_model_list(&base, &cfg.api_key).await?,
+    };
+    if models.is_empty() {
+        return Err(Error::from("upstream model list is empty"));
+    }
+    let results = test_models(cfg.id, &base, &cfg.api_key, models).await;
+    let db = env.d1("DB")?;
+    let mut statements = Vec::new();
+    for r in &results {
+        statements.push(db.prepare(
+            "INSERT INTO model_tests (config_id,model,ok,latency_ms,error,prompt,answer,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"
+        ).bind(&[r.config_id.into(), r.model.clone().into(), (r.ok as i64).into(), r.latency_ms.into(),
+            r.error.clone().unwrap_or_default().into(), r.prompt.clone().into(), r.answer.clone().into(), now_ms().into()])?);
+    }
+    db.batch(statements).await?;
     Response::from_json(&json!({
-        "ok": true,
-        "results": results,
-        "image": png_data_url,
+        "ok": true, "results": results, "image": crate::render::render_results_png(&results),
     }))
 }
 
-async fn fetch_model_list(base_url: &str, api_key: &str) -> Result<Vec<String>> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+async fn fetch_model_list(base: &str, key: &str) -> Result<Vec<String>> {
+    let base = normalize_base_url(base)?;
     let headers = Headers::new();
-    headers.set("Authorization", &format!("Bearer {}", api_key))?;
+    headers.set("Authorization", &format!("Bearer {key}"))?;
     let mut init = RequestInit::new();
-    init.with_method(Method::Get).with_headers(headers);
-    let req = Request::new_with_init(&url, &init)?;
-    let mut resp = Fetch::Request(req).send().await?;
-    let v: serde_json::Value = resp.json().await.unwrap_or(json!({}));
-    Ok(v.get("data")
-        .and_then(|d| d.as_array())
-        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(String::from)).collect())
-        .unwrap_or_default())
+    init.with_method(Method::Get)
+        .with_headers(headers)
+        .with_redirect(RequestRedirect::Error);
+    let req = Request::new_with_init(&format!("{base}/models"), &init)?;
+    let (status, value) = crate::http::fetch_json(req, REQUEST_TIMEOUT).await?;
+    if status != 200 {
+        return Err(Error::from(format!("model list HTTP {status}")));
+    }
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::from("invalid model list"))?;
+    let mut models: Vec<String> = data
+        .iter()
+        .filter_map(|m| m.get("id").and_then(Value::as_str))
+        .filter(|s| !s.is_empty() && s.len() <= 200)
+        .take(1000)
+        .map(String::from)
+        .collect();
+    models.sort();
+    models.dedup();
+    Ok(models)
 }
 
-#[derive(serde::Serialize, Clone)]
+async fn test_models(id: i64, base: &str, key: &str, models: Vec<String>) -> Vec<ModelResult> {
+    // buffer_unordered polls up to CONCURRENCY futures at once; a Vec<Future> alone does not.
+    let futures = models
+        .into_iter()
+        .take(MAX_MODELS)
+        .enumerate()
+        .map(|(index, model)| async move { (index, test_one(id, base, key, &model).await) });
+    let mut results: Vec<_> = stream::iter(futures)
+        .buffer_unordered(CONCURRENCY)
+        .collect()
+        .await;
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
+#[derive(Serialize, Clone)]
 pub struct ModelResult {
     #[serde(skip)]
     pub config_id: i64,
@@ -370,7 +357,6 @@ pub struct ModelResult {
     pub answer: String,
 }
 
-/// 随机产生非 "hi" 试题，防空回 & 避免命中缓存
 fn random_prompt() -> String {
     let kind: u32 = rand::random::<u32>() % 3;
     match kind {
@@ -391,98 +377,128 @@ fn random_prompt() -> String {
             format!("将字符串 '{}' 完全逆序输出，只输出逆序结果：", s)
         }
         _ => {
-            let nums: Vec<i64> = (0..5).map(|_| (rand::random::<u32>() % 100) as i64).collect();
+            let nums: Vec<i64> = (0..5)
+                .map(|_| (rand::random::<u32>() % 100) as i64)
+                .collect();
             format!(
                 "请只输出以下数字之和的阿拉伯数字结果：{}",
-                nums.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" + ")
+                nums.iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" + ")
             )
         }
     }
 }
 
-/// 实际请求测试单个模型（带耗时记录与防空回判断）
-async fn test_one(config_id: i64, base_url: &str, api_key: &str, model: &str) -> ModelResult {
+async fn test_one(id: i64, base: &str, key: &str, model: &str) -> ModelResult {
     let prompt = random_prompt();
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let payload = json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_tokens": 64,
-        "stream": false
-    });
-
+    let payload = json!({"model": model, "messages": [{"role":"user", "content":prompt}],
+        "temperature":0.2, "max_tokens":64, "stream":false});
     let headers = Headers::new();
-    let _ = headers.set("Authorization", &format!("Bearer {}", api_key));
-    let _ = headers.set("Content-Type", "application/json");
-
+    if headers
+        .set("Authorization", &format!("Bearer {key}"))
+        .is_err()
+        || headers.set("Content-Type", "application/json").is_err()
+    {
+        return fail(id, model, &prompt, "请求头无效".into());
+    }
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
         .with_headers(headers)
+        .with_redirect(RequestRedirect::Error)
         .with_body(Some(payload.to_string().into()));
-
+    let req = match Request::new_with_init(&format!("{base}/chat/completions"), &init) {
+        Ok(req) => req,
+        Err(_) => return fail(id, model, &prompt, "构造请求失败".into()),
+    };
     let start = now_ms();
-    let req = match Request::new_with_init(&url, &init) {
-        Ok(r) => r,
-        Err(e) => return fail(config_id, model, &prompt, format!("构造请求失败: {e}")),
+    let (status, value) = match crate::http::fetch_json(req, REQUEST_TIMEOUT).await {
+        Ok(result) => result,
+        Err(_) => return fail(id, model, &prompt, "请求失败/超时/非 JSON 响应".into()),
     };
-
-    let resp = match Fetch::Request(req).send().await {
-        Ok(r) => r,
-        Err(e) => return fail(config_id, model, &prompt, format!("请求失败/超时: {e}")),
-    };
-    let status = resp.status_code();
-    let mut resp = resp;
-    let v: serde_json::Value = resp.json().await.unwrap_or(json!({}));
-    let elapsed = now_ms() - start;
-
     if status != 200 {
-        return fail(config_id, model, &prompt, format!("HTTP {}: {}", status, v));
+        return fail(id, model, &prompt, format!("HTTP {status}"));
     }
-
-    let content = v
-        .get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|a| a.first())
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|x| x.as_str())
+    let content = value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
         .unwrap_or("")
-        .trim()
-        .to_string();
-
-    // 防空回验证：返回内容为空判定为测试失败
+        .trim();
     if content.is_empty() {
-        return fail(config_id, model, &prompt, "空回（返回内容为空）".into());
+        return fail(id, model, &prompt, "空回（返回内容为空）".into());
     }
-
     ModelResult {
-        config_id,
-        model: model.to_string(),
+        config_id: id,
+        model: model.into(),
         ok: true,
-        latency_ms: Some(elapsed),
+        latency_ms: Some(now_ms() - start),
         error: None,
         prompt,
-        answer: truncate(&content, 120),
+        answer: truncate(content, 120).replace(key, "[REDACTED]"),
     }
 }
 
-fn fail(config_id: i64, model: &str, prompt: &str, err: String) -> ModelResult {
+fn fail(id: i64, model: &str, prompt: &str, error: String) -> ModelResult {
     ModelResult {
-        config_id,
-        model: model.to_string(),
+        config_id: id,
+        model: model.into(),
         ok: false,
         latency_ms: None,
-        error: Some(err),
-        prompt: prompt.to_string(),
+        error: Some(error),
+        prompt: prompt.into(),
         answer: String::new(),
     }
 }
 
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
-        s.to_string()
+        s.into()
     } else {
         s.chars().take(n).collect::<String>() + "…"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn urls() {
+        assert_eq!(
+            normalize_base_url("https://api.example.com/").unwrap(),
+            "https://api.example.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.example.com/custom/v2/").unwrap(),
+            "https://api.example.com/custom/v2"
+        );
+        for s in [
+            "http://api.example.com",
+            "https://127.0.0.1",
+            "https://[::1]",
+            "https://localhost",
+            "https://x.local",
+            "https://user:pass@api.example.com",
+            "https://api.example.com?key=a",
+        ] {
+            assert!(normalize_base_url(s).is_err(), "{s}");
+        }
+    }
+    #[test]
+    fn extraction() {
+        let expected = Some(("https://api.example.com/v1".into(), "sk-abc".into()));
+        assert_eq!(
+            extract_api_and_key("https://api.example.com sk-abc"),
+            expected
+        );
+        assert_eq!(
+            extract_api_and_key("URL: https://api.example.com\nKEY: sk-abc"),
+            expected
+        );
+        assert_eq!(
+            extract_api_and_key(r#"{"url":"https://api.example.com","key":"sk-abc"}"#),
+            expected
+        );
+        assert_eq!(extract_api_and_key("只是普通群消息"), None);
     }
 }

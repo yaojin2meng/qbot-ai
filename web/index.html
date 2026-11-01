@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>qbot-ai 管理台</title>
+<title>qqbot 管理台</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; }
@@ -41,9 +41,16 @@
 </head>
 <body>
 <div class="container">
-  <h1>🤖 qbot-ai 管理台</h1>
+  <h1>🤖 qqbot 管理台</h1>
   <div class="sub">QQ 机器人 · 模型测速 · 投票管理</div>
 
+  <div class="card">
+    <h2>管理台登录</h2>
+    <input id="adminToken" type="password" autocomplete="off" placeholder="输入 ADMIN_TOKEN（不会持久保存）">
+    <button onclick="login()">登录 / 刷新</button>
+    <button class="ghost" onclick="logout()">退出</button>
+    <div id="authStatus" class="muted">请先登录，令牌仅保留在当前页面内存中。</div>
+  </div>
   <!-- API 配置 -->
   <div class="card">
     <h2>① 添加 API 配置</h2>
@@ -70,7 +77,7 @@
         <select id="testConfig" onchange="loadModels()"><option value="">-- 选择 --</option></select>
       </div>
       <button class="ghost" onclick="loadModels()">拉取模型</button>
-      <button onclick="runTest()">开始测速</button>
+      <button id="testButton" onclick="runTest()">开始测速</button>
     </div>
     <div id="modelChips" style="margin:10px 0;"></div>
     <div id="log"></div>
@@ -87,10 +94,39 @@
 <script>
 const API = '';
 
+let adminToken = '';
+async function login() {
+  adminToken = document.getElementById('adminToken').value.trim();
+  document.getElementById('adminToken').value = '';
+  if (!adminToken) return alert('请输入 ADMIN_TOKEN');
+  const r = await api('/api/configs');
+  if (!r.ok) { adminToken = ''; return alert('登录失败：' + (r.error || '请检查令牌')); }
+  document.getElementById('authStatus').textContent = '已登录（刷新页面后需重新输入）';
+  await Promise.all([loadConfigs(), loadPolls()]);
+}
+function logout() {
+  adminToken = '';
+  document.getElementById('adminToken').value = '';
+  document.getElementById('authStatus').textContent = '已退出';
+  document.getElementById('configList').textContent = '';
+  document.getElementById('pollList').textContent = '';
+  document.getElementById('log').textContent = '';
+  document.getElementById('testImage').textContent = '';
+  document.getElementById('modelChips').textContent = '';
+  document.getElementById('testConfig').innerHTML = '<option value="">-- 选择 --</option>';
+}
 async function api(path, opts = {}) {
-  const res = await fetch(API + path, opts);
-  const text = await res.text();
-  try { return JSON.parse(text); } catch { return { ok: false, raw: text }; }
+  if (!adminToken) return { ok: false, error: '请先登录' };
+  try {
+    const headers = new Headers(opts.headers || {});
+    headers.set('Authorization', 'Bearer ' + adminToken);
+    const res = await fetch(API + path, { ...opts, headers, cache: 'no-store' });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { ok: false, error: text || ('HTTP ' + res.status) }; }
+    if (!res.ok) data.ok = false;
+    return data;
+  } catch { return { ok: false, error: '网络请求失败，请检查连接' }; }
 }
 
 function log(msg) {
@@ -142,7 +178,8 @@ async function addConfig() {
 
 async function delConfig(id) {
   if (!confirm('确认删除该配置？')) return;
-  await api('/api/configs/' + id, { method: 'DELETE' });
+  const r = await api('/api/configs/' + id, { method: 'DELETE' });
+  if (!r.ok) return alert('删除失败：' + JSON.stringify(r));
   loadConfigs();
 }
 
@@ -167,15 +204,18 @@ async function runTest() {
   if (!id) return alert('请先选择配置');
   document.getElementById('log').textContent = '';
   document.getElementById('testImage').innerHTML = '';
-  log('开始测速（随机题、防空回）…可能需要十几秒');
+  log('开始测速（并发 5，最多 30 个模型）；单个请求超时 15 秒，最多约两分钟。');
+  const button = document.getElementById('testButton');
+  button.disabled = true;
   const r = await api('/api/configs/' + id + '/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({})
   });
+  button.disabled = false;
   if (!r.ok) { log('测速失败: ' + JSON.stringify(r)); return; }
   renderResults(r.results);
-  if (r.image) {
+  if (typeof r.image === 'string' && r.image.startsWith('data:image/png;base64,')) {
     document.getElementById('testImage').innerHTML = `<img src="${r.image}" alt="测速报告">`;
     log('已生成测速报告图片');
   } else {
@@ -222,12 +262,14 @@ async function loadPolls() {
 }
 
 function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '"');
+  const el = document.createElement('span');
+  el.textContent = String(s);
+  return el.innerHTML;
 }
 
-// 初始化
-loadConfigs();
-loadPolls();
+// 登录前不访问管理 API。
+document.getElementById('configList').textContent = '请先登录';
+document.getElementById('pollList').textContent = '请先登录';
 </script>
 </body>
 </html>

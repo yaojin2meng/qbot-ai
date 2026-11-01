@@ -3,6 +3,7 @@ use crate::model_test::ModelResult;
 const ROW_H: i32 = 44;
 const PAD: i32 = 24;
 const HEAD_H: i32 = 90;
+const TABLE_H: i32 = 32;
 const COL_MODEL_X: i32 = PAD + 12;
 const COL_STATUS_X: i32 = 560;
 const COL_TIME_X: i32 = 700;
@@ -11,7 +12,7 @@ const COL_TIME_X: i32 = 700;
 pub fn build_svg(results: &[ModelResult]) -> String {
     let rows = results.len() as i32;
     let width = 960;
-    let height = HEAD_H + rows * ROW_H + PAD;
+    let height = HEAD_H + TABLE_H + rows * ROW_H + PAD;
 
     let mut body = String::new();
     body.push_str(&format!(
@@ -37,12 +38,12 @@ pub fn build_svg(results: &[ModelResult]) -> String {
         mx = COL_MODEL_X,
         sx = COL_STATUS_X,
         tx = COL_TIME_X,
-        ty = HEAD_H + 4,
+        ty = HEAD_H + 23,
     ));
 
     for (i, r) in results.iter().enumerate() {
-        let y = HEAD_H + (i as i32) * ROW_H + 4;
-        let row_top = HEAD_H + (i as i32) * ROW_H;
+        let y = HEAD_H + TABLE_H + (i as i32) * ROW_H + 4;
+        let row_top = HEAD_H + TABLE_H + (i as i32) * ROW_H;
         // 斑马纹
         if i % 2 == 0 {
             body.push_str(&format!(
@@ -56,9 +57,19 @@ pub fn build_svg(results: &[ModelResult]) -> String {
         // 状态徽章色 + 文本
         let (badge_color, status_text) = if r.ok {
             ("#16a34a", "成功")
-        } else if r.error.as_deref().map(|e| e.contains("空回")).unwrap_or(false) {
+        } else if r
+            .error
+            .as_deref()
+            .map(|e| e.contains("空回"))
+            .unwrap_or(false)
+        {
             ("#d97706", "空回")
-        } else if r.error.as_deref().map(|e| e.contains("超时")).unwrap_or(false) {
+        } else if r
+            .error
+            .as_deref()
+            .map(|e| e.contains("超时"))
+            .unwrap_or(false)
+        {
             ("#dc2626", "超时")
         } else {
             ("#dc2626", "错误")
@@ -84,7 +95,7 @@ pub fn build_svg(results: &[ModelResult]) -> String {
             <text x="{tx}" y="{ty}" font-size="14" fill="{result_color}" >{result}</text>"##,
             mx = COL_MODEL_X,
             ty = y + 24,
-            model = escape_xml(&r.model),
+            model = escape_xml(&r.model.chars().take(48).collect::<String>()),
             sx = COL_STATUS_X,
             badge_y = row_top + 10,
             badge_color = badge_color,
@@ -124,7 +135,13 @@ pub fn render_results_png(results: &[ModelResult]) -> String {
 
 fn svg_to_png(svg: &str) -> Result<Vec<u8>, ()> {
     use resvg::tiny_skia;
-    let opt = resvg::usvg::Options::default();
+    let mut opt = resvg::usvg::Options::default();
+    opt.fontdb_mut()
+        .load_font_data(include_bytes!("../assets/report-font.ttf").to_vec());
+    opt.font_family = "Noto Sans SC".into();
+    if opt.fontdb.faces().next().is_none() {
+        return Err(());
+    }
     let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|_| ())?;
     let size = tree.size().to_int_size();
     let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height()).ok_or(())?;
@@ -150,4 +167,23 @@ fn escape_xml(s: &str) -> String {
         }
     }
     out
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn embedded_font_and_png() {
+        let result = ModelResult {
+            config_id: 0,
+            model: "test-model".into(),
+            ok: true,
+            latency_ms: Some(123),
+            error: None,
+            prompt: String::new(),
+            answer: String::new(),
+        };
+        let bytes = render_results_png_bytes(&[result]).expect("embedded-font PNG should render");
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(escape_xml("<&>"), "&lt;&amp;&gt;");
+    }
 }

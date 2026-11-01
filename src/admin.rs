@@ -1,6 +1,6 @@
-use worker::*;
 use serde::Deserialize;
 use serde_json::json;
+use worker::*;
 
 fn now_ms() -> i64 {
     Date::now().as_millis() as i64
@@ -16,7 +16,9 @@ struct CreateConfigBody {
 /// GET /api/configs —— 列出所有 API 配置（api_key 打码）
 pub async fn list_configs(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let db = ctx.env.d1("DB")?;
-    let stmt = db.prepare("SELECT id, name, base_url, api_key, created_at FROM api_configs ORDER BY id DESC");
+    let stmt = db.prepare(
+        "SELECT id, name, base_url, api_key, created_at FROM api_configs ORDER BY id DESC",
+    );
     let res = stmt.all().await?;
     let rows: Vec<serde_json::Value> = res.results::<serde_json::Value>()?;
 
@@ -37,16 +39,31 @@ pub async fn list_configs(_req: Request, ctx: RouteContext<()>) -> Result<Respon
 
 /// POST /api/configs —— 新增配置
 pub async fn create_config(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    let body: CreateConfigBody = req.json().await?;
+    let body: CreateConfigBody = match req.json().await {
+        Ok(body) => body,
+        Err(_) => return Response::error("invalid JSON", 400),
+    };
+    let base_url = match crate::model_test::normalize_base_url(&body.base_url) {
+        Ok(url) => url,
+        Err(_) => return Response::error("请输入不含凭据的公网 HTTPS API 地址", 400),
+    };
+    if body.name.len() > 200
+        || body.api_key.len() > 4096
+        || body.api_key.chars().any(char::is_control)
+    {
+        return Response::error("invalid name or key", 400);
+    }
     if body.base_url.trim().is_empty() || body.api_key.trim().is_empty() {
         return Response::error("base_url / api_key 不能为空", 400);
     }
     let db = ctx.env.d1("DB")?;
     let res = db
-        .prepare("INSERT INTO api_configs (name, base_url, api_key, created_at) VALUES (?1,?2,?3,?4)")
+        .prepare(
+            "INSERT INTO api_configs (name, base_url, api_key, created_at) VALUES (?1,?2,?3,?4)",
+        )
         .bind(&[
             body.name.into(),
-            body.base_url.trim().trim_end_matches('/').into(),
+            base_url.into(),
             body.api_key.trim().into(),
             now_ms().into(),
         ])?
@@ -58,10 +75,22 @@ pub async fn create_config(mut req: Request, ctx: RouteContext<()>) -> Result<Re
 
 /// DELETE /api/configs/:id
 pub async fn delete_config(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    let id: i64 = ctx.param("id").unwrap().parse().unwrap_or(0);
+    let id = match ctx
+        .param("id")
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|id| *id > 0)
+    {
+        Some(id) => id,
+        None => return Response::error("invalid id", 400),
+    };
     let db = ctx.env.d1("DB")?;
-    db.prepare("DELETE FROM api_configs WHERE id = ?1").bind(&[id.into()])?.run().await?;
-    db.prepare("DELETE FROM model_tests WHERE config_id = ?1").bind(&[id.into()])?.run().await?;
+    db.batch(vec![
+        db.prepare("DELETE FROM model_tests WHERE config_id=?1")
+            .bind(&[id.into()])?,
+        db.prepare("DELETE FROM api_configs WHERE id=?1")
+            .bind(&[id.into()])?,
+    ])
+    .await?;
     Response::from_json(&json!({ "ok": true }))
 }
 
