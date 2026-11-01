@@ -19,6 +19,8 @@ base64 = "0.22"
 
 # 随机出题 & 随机种子
 rand = "0.8"
+# 解决 wasm32-unknown-unknown 下缺少随机数熵的编译错误
+getrandom = { version = "0.2", features = ["js"] }
 
 # SVG -> PNG 纯 Rust 光栅化
 resvg = "0.44"
