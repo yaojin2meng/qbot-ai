@@ -15,11 +15,11 @@ fn build_svg(results: &[ModelResult]) -> String {
 
     let mut body = String::new();
     body.push_str(&format!(
-        r#"<rect x="0" y="0" width="{width}" height="{height}" fill="#0f172a"/>
-        <text x="{x}" y="44" font-size="26" font-weight="bold" fill="#e2e8f0">模型 API 测速报告</text>
-        <text x="{x}" y="72" font-size="14" fill="#94a3b8">共 {n} 个模型 · 随机题防空回 · 单位 ms</text>
-        <line x1="{pad}" y1="{head}" x2="{line_end}" y2="{head}" stroke="#334155" stroke-width="1"/>
-        "#,
+        r##"<rect x="0" y="0" width="{width}" height="{height}" fill="#0f172a" />
+        <text x="{x}" y="44" font-size="26" font-weight="bold" fill="#e2e8f0" >模型 API 测速报告</text>
+        <text x="{x}" y="72" font-size="14" fill="#94a3b8" >共 {n} 个模型 · 随机题防空回 · 单位 ms</text>
+        <line x1="{pad}" y1="{head}" x2="{line_end}" y2="{head}" stroke="#334155" stroke-width="1" />
+        "##,
         width = width,
         height = height,
         x = COL_MODEL_X,
@@ -31,9 +31,9 @@ fn build_svg(results: &[ModelResult]) -> String {
 
     // 表头
     body.push_str(&format!(
-        r#"<text x="{mx}" y="{ty}" font-size="15" fill="#64748b">模型</text>
-        <text x="{sx}" y="{ty}" font-size="15" fill="#64748b">状态</text>
-        <text x="{tx}" y="{ty}" font-size="15" fill="#64748b">耗时/结果</text>"#,
+        r##"<text x="{mx}" y="{ty}" font-size="15" fill="#64748b" >模型</text>
+        <text x="{sx}" y="{ty}" font-size="15" fill="#64748b" >状态</text>
+        <text x="{tx}" y="{ty}" font-size="15" fill="#64748b" >耗时/结果</text>"##,
         mx = COL_MODEL_X,
         sx = COL_STATUS_X,
         tx = COL_TIME_X,
@@ -46,7 +46,7 @@ fn build_svg(results: &[ModelResult]) -> String {
         // 斑马纹
         if i % 2 == 0 {
             body.push_str(&format!(
-                r#"<rect x="8" y="{row_top}" width="{w}" height="{ROW_H}" fill="#1e293b"/>"#,
+                r##"<rect x="8" y="{row_top}" width="{w}" height="{ROW_H}" fill="#1e293b" />"##,
                 row_top = row_top,
                 w = width - 16,
                 ROW_H = ROW_H
@@ -78,10 +78,10 @@ fn build_svg(results: &[ModelResult]) -> String {
         };
 
         body.push_str(&format!(
-            r#"<text x="{mx}" y="{ty}" font-size="15" fill="#e2e8f0">{model}</text>
-            <rect x="{sx}" y="{badge_y}" width="64" height="24" rx="12" fill="{badge_color}"/>
-            <text x="{sx_center}" y="{badge_text_y}" font-size="13" fill="#ffffff" text-anchor="middle">{status}</text>
-            <text x="{tx}" y="{ty}" font-size="14" fill="{result_color}">{result}</text>"#,
+            r##"<text x="{mx}" y="{ty}" font-size="15" fill="#e2e8f0" >{model}</text>
+            <rect x="{sx}" y="{badge_y}" width="64" height="24" rx="12" fill="{badge_color}" />
+            <text x="{sx_center}" y="{badge_text_y}" font-size="13" fill="#ffffff" text-anchor="middle" >{status}</text>
+            <text x="{tx}" y="{ty}" font-size="14" fill="{result_color}" >{result}</text>"##,
             mx = COL_MODEL_X,
             ty = y + 24,
             model = escape_xml(&r.model),
@@ -98,7 +98,7 @@ fn build_svg(results: &[ModelResult]) -> String {
     }
 
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">{body}</svg>"#,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">{body}</svg>"##,
         width = width,
         height = height,
         body = body
@@ -134,9 +134,17 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', """)
-        .replace('\'', "'")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("\x26\x71\x75\x6f\x74\x3b"),
+            '\'' => out.push_str("\x26\x61\x70\x6f\x73\x3b"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
 }
