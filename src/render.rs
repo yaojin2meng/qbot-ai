@@ -8,7 +8,7 @@ const COL_STATUS_X: i32 = 560;
 const COL_TIME_X: i32 = 700;
 
 /// 将测试结果渲染为 SVG 字符串
-fn build_svg(results: &[ModelResult]) -> String {
+pub fn build_svg(results: &[ModelResult]) -> String {
     let rows = results.len() as i32;
     let width = 960;
     let height = HEAD_H + rows * ROW_H + PAD;
@@ -105,16 +105,20 @@ fn build_svg(results: &[ModelResult]) -> String {
     )
 }
 
+/// 将结果渲染为 PNG 字节数组
+pub fn render_results_png_bytes(results: &[ModelResult]) -> Option<Vec<u8>> {
+    let svg = build_svg(results);
+    svg_to_png(&svg).ok()
+}
+
 /// 将结果渲染为 PNG data URL（base64）
 pub fn render_results_png(results: &[ModelResult]) -> String {
-    let svg = build_svg(results);
-    // 尝试用 resvg 光栅化；若字体缺失则返回空串（前端可降级显示表格）
-    match svg_to_png(&svg) {
-        Ok(bytes) => {
+    match render_results_png_bytes(results) {
+        Some(bytes) => {
             let b64 = base64_encode(&bytes);
             format!("data:image/png;base64,{}", b64)
         }
-        Err(_) => String::new(),
+        None => String::new(),
     }
 }
 
@@ -146,5 +150,4 @@ fn escape_xml(s: &str) -> String {
         }
     }
     out
-}
 }

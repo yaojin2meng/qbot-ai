@@ -224,9 +224,11 @@ async fn is_duplicate(ctx: &RouteContext<()>, key: &str) -> bool {
     false
 }
 
-/// 处理群 @消息：识别「投票 <主题> <人数>」指令
+/// 处理群 @消息：识别「投票 <主题> <人数>」指令，或识别 API+Key 自动测速出图
 async fn handle_group_message(evt: GroupAtMessage, ctx: &RouteContext<()>) -> Result<()> {
     let text = evt.content.trim().to_string(); // 官方已自动去除 @ 前缀
+
+    // 1. 检查是否为投票指令
     if let Some((topic, target)) = crate::poll::parse_vote_command(&text) {
         let member = evt
             .author
@@ -234,7 +236,15 @@ async fn handle_group_message(evt: GroupAtMessage, ctx: &RouteContext<()>) -> Re
             .clone()
             .unwrap_or_else(|| evt.author.id.clone());
         crate::poll::create_poll(ctx, &evt.group_openid, &evt.id, &member, &topic, target).await?;
+        return Ok(());
     }
+
+    // 2. 检查是否为 API + Key 配置（格式一: NewAPI JSON, 格式二: 换行/包含 url+key 的文本）
+    if let Some((url, key)) = crate::model_test::extract_api_and_key(&text) {
+        crate::model_test::test_and_reply_group(ctx, &evt.group_openid, &evt.id, &url, &key).await?;
+        return Ok(());
+    }
+
     Ok(())
 }
 
