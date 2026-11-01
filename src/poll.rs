@@ -156,7 +156,7 @@ pub async fn handle_vote_click(
         .run()
         .await?;
 
-    let inserted = res.meta()?.map(|m| m.changes).unwrap_or(0);
+    let inserted = res.meta()?.and_then(|m| m.changes).unwrap_or(0);
     if inserted == 0 {
         return Ok(()); // 已投过票，静默忽略
     }
