@@ -296,6 +296,21 @@ function formatReport(results: ModelResult[]): string {
   return truncate(lines.join('\n'), MAX_REPORT_CHARS);
 }
 
+/**
+ * 发消息但永不抛错：投递失败只记日志。
+ *
+ * 测速本身已经花掉了上游额度，如果仅仅因为消息没发出去（比如超出 QQ 的
+ * 5 分钟被动回复窗口）就让整个队列 job 失败，cloudflare 会重试 3 次，
+ * 结果是同一批模型被反复重测、额度白白烧掉。所以投递失败一律吞掉。
+ */
+async function safeSend(env: Env, group: string, payload: unknown): Promise<void> {
+  try {
+    await sendGroup(env, group, payload);
+  } catch (e) {
+    console.error('QQ message delivery failed:', e);
+  }
+}
+
 export async function testAndReplyGroup(
   env: Env,
   group: string,
@@ -307,7 +322,7 @@ export async function testAndReplyGroup(
   try {
     normalized = normalizeBaseUrl(base);
   } catch (e) {
-    await sendGroup(env, group, {
+    await safeSend(env, group, {
       msg_type: 0,
       content: `API Base URL 不合法：${(e as Error).message}`,
       msg_id: msg,
@@ -316,13 +331,12 @@ export async function testAndReplyGroup(
     return;
   }
 
-  // 进度消息失败只记日志，不能当成「已成功发送」。
-  await sendGroup(env, group, {
+  await safeSend(env, group, {
     msg_type: 0,
     content: '已识别 API，正在测速（最多 30 个模型，单个超时 15 秒）。',
     msg_id: msg,
     msg_seq: 1,
-  }).catch((e) => console.error('QQ test progress message failed:', e));
+  });
 
   let models: string[];
   try {
@@ -332,7 +346,7 @@ export async function testAndReplyGroup(
     models = [];
   }
   if (models.length === 0) {
-    await sendGroup(env, group, {
+    await safeSend(env, group, {
       msg_type: 0,
       content: '拉取模型失败或列表为空，请检查 API Base URL、Key 与接口权限。',
       msg_id: msg,
@@ -343,7 +357,7 @@ export async function testAndReplyGroup(
 
   const results = await testModels(normalized, key, models);
   // 纯文本：需要的 QQ 权限最少，也不会被上游模型名注入 Markdown。
-  await sendGroup(env, group, {
+  await safeSend(env, group, {
     msg_type: 0,
     content: formatReport(results),
     msg_id: msg,
