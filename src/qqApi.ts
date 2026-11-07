@@ -2,7 +2,49 @@ import * as config from './config';
 import type { Env } from './env';
 import { fetchJson } from './http';
 
-const TOKEN_ENDPOINT = 'https://bots.qq.com/app/getAppAccessToken';
+/**
+ * 取 AccessToken 的地址。
+ *
+ * 官方文档（API 调用指南）写的是 `https://api.bot.qq.com/app/getAppAccessToken`，
+ * 并说明「统一地址 https://api.bot.qq.com」。但官方 SDK（botpy/botgo）与早期
+ * 文档一直用 `https://bots.qq.com/app/getAppAccessToken`，两个域名目前都还有在用。
+ * 所以按文档地址优先、老域名兜底，避免任何一个域名下线就整条链路挂掉。
+ */
+const TOKEN_ENDPOINTS = [
+  'https://api.bot.qq.com/app/getAppAccessToken',
+  'https://bots.qq.com/app/getAppAccessToken',
+] as const;
+
+interface TokenResponse {
+  status: number;
+  json: unknown;
+}
+
+/** 依次尝试各端点；第一个能拿到 200 响应的就用它。 */
+async function requestToken(appId: string, secret: string): Promise<TokenResponse> {
+  let lastError: unknown = null;
+  for (const endpoint of TOKEN_ENDPOINTS) {
+    try {
+      const result = await fetchJson(
+        endpoint,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ appId, clientSecret: secret }),
+        },
+        8,
+      );
+      if (result.status === 200) return result;
+      lastError = new Error(`${endpoint} 返回 HTTP ${result.status}`);
+    } catch (e) {
+      lastError = e;
+    }
+    console.error('access token endpoint failed, trying next:', String(lastError));
+  }
+  throw new Error(
+    `取 AccessToken 失败：${(lastError as Error)?.message ?? '所有端点均不可用'}`,
+  );
+}
 
 export function validId(value: string): boolean {
   return (
@@ -92,15 +134,7 @@ async function getAccessToken(env: Env): Promise<string> {
   const cached = await env.KV.get(cacheKey);
   if (cached) return cached;
 
-  const { status, json } = await fetchJson(
-    TOKEN_ENDPOINT,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, clientSecret: secret }),
-    },
-    8,
-  );
+  const { status, json } = await requestToken(appId, secret);
   if (status !== 200) {
     throw new Error(
       `QQ 取 AccessToken 失败（HTTP ${status}），请检查 QQ_APP_ID / QQ_APP_SECRET`,
@@ -143,15 +177,7 @@ export async function probe(env: Env): Promise<void> {
     throw new Error('QQ_APP_ID / QQ_APP_SECRET 不能为空');
   }
 
-  const { status, json } = await fetchJson(
-    TOKEN_ENDPOINT,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, clientSecret: secret }),
-    },
-    8,
-  );
+  const { status, json } = await requestToken(appId, secret);
   if (status !== 200) {
     throw new Error(`QQ 返回 HTTP ${status}`);
   }

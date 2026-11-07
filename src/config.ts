@@ -4,8 +4,12 @@ export const KEY_APP_ID = 'QQ_APP_ID';
 export const KEY_APP_SECRET = 'QQ_APP_SECRET';
 export const KEY_API_BASE = 'QQ_API_BASE';
 export const KEY_SKIP_SIGNATURE = 'SKIP_SIGNATURE';
-export const DEFAULT_API_BASE = 'https://api.sgroup.qq.com';
-export const OFFICIAL_ORIGINS = ['https://api.sgroup.qq.com', 'https://api.bot.qq.com'];
+/**
+ * 官方文档「API 调用指南」给的统一地址是 https://api.bot.qq.com；
+ * api.sgroup.qq.com 是早期域名，目前仍可用，保留为可选。
+ */
+export const DEFAULT_API_BASE = 'https://api.bot.qq.com';
+export const OFFICIAL_ORIGINS = ['https://api.bot.qq.com', 'https://api.sgroup.qq.com'];
 
 export type Source = 'd1' | 'secret' | 'var' | 'missing';
 
@@ -113,7 +117,7 @@ const FIELD_SPECS: FieldSpec[] = [
     label: 'QQ_API_BASE',
     required: false,
     secret: false,
-    hint: '默认 api.sgroup.qq.com；遇到 403 换成 api.bot.qq.com',
+    hint: '默认 api.bot.qq.com（文档统一地址）；遇到 403 可换成 api.sgroup.qq.com',
   },
   {
     key: KEY_SKIP_SIGNATURE,

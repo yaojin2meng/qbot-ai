@@ -127,10 +127,10 @@
     <div class="field">
       <label>QQ API 域名</label>
       <select id="setupApiBase">
-        <option value="https://api.sgroup.qq.com">https://api.sgroup.qq.com（默认）</option>
-        <option value="https://api.bot.qq.com">https://api.bot.qq.com（报 403 时用这个）</option>
+        <option value="https://api.bot.qq.com">https://api.bot.qq.com（默认，文档统一地址）</option>
+        <option value="https://api.sgroup.qq.com">https://api.sgroup.qq.com（早期域名，报 403 时可换）</option>
       </select>
-      <div class="hint">不确定就保持默认，之后遇到 403 再改。</div>
+      <div class="hint">不确定就保持默认，之后遇到 403 再换。</div>
     </div>
 
     <button id="setupBtn" onclick="doSetup()">保存并启用</button>

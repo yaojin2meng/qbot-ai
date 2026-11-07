@@ -118,6 +118,24 @@ npx wrangler secret put QQ_APP_SECRET
 | 事件解析 | 事件类型在 `payload.t`，事件体在 `payload.d` |
 | 消息去重 | 相同 msg_id 会重复推送，用 `webhook_events` + 租约锁去重 |
 
+### 接口已逐条对照官方文档
+
+文档：<https://bot.q.qq.com/wiki/develop/api-v2/>
+
+| 用途 | 请求 | 依据 |
+|---|---|---|
+| 取 AccessToken | `POST https://api.bot.qq.com/app/getAppAccessToken`，body `{appId, clientSecret}` | API 调用指南（统一地址 `api.bot.qq.com`） |
+| 发群消息 | `POST /v2/groups/{group_openid}/messages` | 发送群聊消息 |
+| 互动事件响应 | `PUT /interactions/{interaction_id}`，body `{"code":0}`；仅 `type=11`（消息按钮）/`type=12`（快捷菜单）需要 | 互动事件响应 |
+| 鉴权头 | `Authorization: QQBot {ACCESS_TOKEN}` | API 调用指南 |
+| 被动回复 | 带 `msg_id`（`d.id`）+ 递增 `msg_seq`；群聊 5 分钟内、最多 5 次 | 消息收发概述 |
+| 主动消息 | 不带 `msg_id`；群聊 Bot 60 qpm（未认证 30 qpm）、单群 20 qpm、1000 条/群/天 | 消息收发概述 |
+| Markdown | `msg_type=2` + `markdown.content`，此时 `content` 必须为空；支持标题/加粗/斜体/删除线/链接/图片/有序无序列表/块引用/分割线，**不支持表格** | Markdown 消息 |
+| 错误码 | `40034100` 主动消息超频控、`40034105` 无权限、`40054005` 消息被去重（msg_seq 重复）、`304103`/`40034005` msg_id 过期 | 发送群聊消息 |
+
+> 取 token 的老域名 `https://bots.qq.com/app/getAppAccessToken` 仍被官方 SDK（botpy/botgo）使用，
+> 代码里按「文档地址优先、老域名兜底」处理，任一域名下线都不会导致整条链路挂掉。
+
 ### 签名算法已实测验证 ✅
 
 ```
