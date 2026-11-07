@@ -73,18 +73,37 @@ function configPair(baseUrl: string, key: string): { base: string; key: string }
 }
 
 /**
- * 判断一段文本是不是「连接信息」形态：带 url + key 字段的 JSON 对象。
+ * 判断一段文本是不是「连接信息」形态，用于在群里直接粘配置时自动触发测速。
  *
- * 用于群里直接粘 new-api / one-api 的连接信息（形如
- * `{"key":"sk-…","url":"https://…"}`）时自动触发测速。
- * 只认这种特征明显的 JSON，不会因为普通链接、或提到「sk-」就误触发。
+ * 认两种：
+ *   1) JSON：`{"key":"sk-…","url":"https://…"}`（new-api / one-api 的连接信息）
+ *   2) 纯文本：一条 http(s) 地址 + 一个 sk- 开头的长 key，顺序不限，
+ *      中间换行/空格都行，且整段不超过 4 个 token（防止把聊天正文当配置）。
+ *
+ * 不认：普通链接、只提到 sk- 的讨论、缺 url 或 key 的 JSON。
  */
 export function looksLikeConfigPayload(text: string): boolean {
-  if (text.length === 0 || text.length > 4096) return false;
-  const open = text.indexOf('{');
-  const close = text.lastIndexOf('}');
-  if (open === -1 || close <= open) return false;
-  return /"(?:key|api_key)"\s*:/.test(text) && /"(?:url|base_url)"\s*:/.test(text);
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > 4096) return false;
+
+  // 1) JSON 形态
+  if (
+    trimmed.includes('{') &&
+    trimmed.includes('}') &&
+    /"(?:key|api_key)"\s*:/.test(trimmed) &&
+    /"(?:url|base_url)"\s*:/.test(trimmed)
+  ) {
+    return true;
+  }
+
+  // 2) 纯文本形态
+  const tokens = trimmed.split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0 || tokens.length > 4) return false;
+
+  const isUrl = (t: string) => /^https?:\/\//i.test(t) && t.length > 10;
+  const isKey = (t: string) => /^sk-[A-Za-z0-9_-]{16,}$/.test(t);
+
+  return tokens.filter(isUrl).length === 1 && tokens.filter(isKey).length === 1;
 }
 
 /**
