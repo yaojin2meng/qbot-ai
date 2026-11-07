@@ -1,89 +1,98 @@
 # qbot-ai
 
-QQ 官方机器人（Rust + Cloudflare Workers），具备：
-1. **模型 API 测速**：填入 Base URL + Key → 自动拉取模型列表 → 用随机题测试（防空回）→ 生成测速报告图片。
-2. **群内投票**：`投票 <主题> <预计人数>` → 发出带「赞成/反对/弃权」按钮的消息 → 每人一票 → 达标自动结算汇总。
-3. **Web UI 管理台**：配置 API、一键测速看图、查看投票记录。
+QQ 官方机器人（Cloudflare Workers + TypeScript），具备：
 
-> ⚠️ 本项目已按 QQ 官方文档逐项核对并修正（含签名算法实测比对通过），详见 **[docs/OFFICIAL_DOC_CHECK.md](docs/OFFICIAL_DOC_CHECK.md)**。
+1. **模型 API 测速**：`测速 <Base URL> <API Key>` → 自动拉模型列表 → 用随机题测试（防空回）→ 回一份测速报告。
+2. **群内投票**：`投票 <主题> <预计人数>` → 发出带「赞成/反对/弃权」按钮的消息 → 每人一票 → 达标自动结算汇总。
+3. **Web 配置台**：网页内完成首次初始化、凭据自检、一键验证。
+
+> ⚠️ 各接口的字段与签名细节均按 QQ 官方文档核对过，详见 **[docs/OFFICIAL_DOC_CHECK.md](docs/OFFICIAL_DOC_CHECK.md)**。
 
 ## 技术栈
-- Rust → WebAssembly，运行在 Cloudflare Workers
-- Cloudflare D1（SQLite）存投票与配置
-- Cloudflare KV 缓存 Bot AccessToken + 消息去重
-- 纯 Rust `resvg` + `tiny-skia` 渲染 SVG→PNG 出图
-- `ed25519-dalek` 实现回调 Ed25519 验签
+
+- **TypeScript** → 由 wrangler 打包，运行在 Cloudflare Workers（**没有 Rust / wasm 构建步骤**）
+- Cloudflare **D1**（SQLite）存投票、配置与幂等记录
+- Cloudflare **KV** 缓存 Bot AccessToken
+- Cloudflare **Queues** 承接事件，先入队再 ACK
+- **WebCrypto Ed25519** 实现回调验签与 `op=13` 回调地址验证（无第三方加密库）
+
+产物体积：**51 KiB / gzip 16 KiB**，免费版 Workers（1 MiB gzip）绰绰有余。
 
 ## 目录结构
+
 ```
-Cargo.toml                     依赖与构建配置
-wrangler.toml                  Workers / D1 / KV 绑定
-migrations/0001_init.sql       数据库建表
-docs/OFFICIAL_DOC_CHECK.md     官方文档核对与修正记录 ⭐
-src/lib.rs                     路由入口
-src/qq.rs                      Ed25519 验签 + op13 验证 + 事件派发 + 去重
-src/poll.rs                    投票指令解析/创建/按钮回调 ACK/去重/结算
-src/model_test.rs              模型拉取 + 随机题测速 + 防空回
-src/render.rs                  测速结果 SVG→PNG 出图
-src/admin.rs                   配置增删查、投票记录
-web/index.html                 管理台（内嵌进 Worker）
+wrangler.toml          Workers / D1 / KV / Queues 绑定
+package.json           依赖与脚本
+migrations/
+  0001_init.sql        投票表
+  0002_reliability.sql 幂等表、租约锁、投票触发器
+  0003_settings.sql    运行时配置表
+  0004_cleanup.sql     清理废弃表
+src/
+  index.ts             入口：路由 + 队列消费者
+  qq.ts                Ed25519 验签、op13 验证、事件派发、幂等消费
+  qqApi.ts             QQ OpenAPI 封装、AccessToken 缓存、凭据自检
+  poll.ts              投票指令解析 / 创建 / 按钮回调 / 结算
+  modelTest.ts         URL 校验、随机题测速、并发池、报告生成
+  config.ts            配置读取（D1 → secret/vars）、状态自检、首次初始化
+  security.ts          D1 租约锁（去重 + 限流）
+  http.ts              带超时与体积上限的 JSON 请求
+  env.ts               Worker 绑定类型
+web/index.html         配置台（构建时内嵌进 Worker）
 ```
 
 ## 部署步骤
 
-### 1. 准备工具
+### 1. 安装依赖
 ```bash
-npm i -g wrangler
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup target add wasm32-unknown-unknown
-cargo install worker-build
+npm install
 ```
 
 ### 2. 登录 Cloudflare
 ```bash
-wrangler login
+npx wrangler login
 ```
 
-### 3. 创建 D1 与 KV
+### 3. 创建 D1 与 KV，并填进 `wrangler.toml`
 ```bash
-wrangler d1 create qbot-db
-# 把输出 database_id 填进 wrangler.toml
-
-wrangler kv namespace create KV
-# 把输出 id 填进 wrangler.toml
+npx wrangler d1 create qbot          # 把 database_id 填进 wrangler.toml
+npx wrangler kv namespace create KV  # 把 id 填进 wrangler.toml
+npx wrangler queues create qqbot-events
 ```
 
 ### 4. 初始化数据库
 ```bash
-wrangler d1 execute qbot-db --file=./migrations/0001_init.sql --remote
+npx wrangler d1 migrations apply qbot --remote
 ```
 
-### 5. 配置密钥
+### 5. 部署
 ```bash
-wrangler secret put QQ_APP_ID
-wrangler secret put QQ_APP_SECRET      # 同时用于 AccessToken 获取和回调验签
+npx wrangler deploy
 ```
 
-### 6. 部署
-```bash
-wrangler deploy
-```
-
-### 7. QQ 开放平台配置
+### 6. QQ 开放平台配置
 - 回调地址：`https://<你的域名>/qq/webhook`
 - 订阅事件：`GROUP_AT_MESSAGE_CREATE`、`INTERACTION_CREATE`
 - 需申请权限：群聊能力、主动消息、Markdown 消息、消息按钮（自定义按钮为内邀能力）
 
-### 8. 打开管理台
-访问 `https://<你的域名>/` 即可管理 API 配置与查看投票。
+### 7. 打开配置台
+访问 `https://<你的域名>/`，填 AppID / AppSecret。**只需填一次**，之后配置台变为只读。
+
+也可以不用网页，直接下发 secret：
+```bash
+npx wrangler secret put QQ_APP_ID
+npx wrangler secret put QQ_APP_SECRET
+```
 
 ## 群内使用
+
 ```
 投票 周末去爬山吗 10
+测速 https://api.deepseek.com/v1 sk-xxxx
+帮助
 ```
-机器人发出带三按钮的卡片；每人限一票；满 10 人自动结算并汇总。
 
-## 关键实现说明（已按官方文档修正）
+## 关键实现说明
 
 | 项 | 正确做法 |
 |---|---|
@@ -92,20 +101,24 @@ wrangler deploy
 | 按钮点击回应 | 必须 `PUT /interactions/{id}` body `{"code":0}`，否则客户端一直 loading |
 | 群用户字段 | `INTERACTION_CREATE` 用 `group_member_openid`；群@消息用 `author.member_openid` |
 | 回调地址验证 op=13 | 返回 `{plain_token, signature}`，signature=`hex(Ed25519(event_ts+plain_token))` |
-| 验签 | `X-Signature-Ed25519`/`X-Signature-Timestamp`，签名体=`timestamp+body`，seed=`AppSecret` 重复至 32 字节 |
+| 验签 | `X-Signature-Ed25519` / `X-Signature-Timestamp`，签名体=`timestamp+body`，seed=`AppSecret` 重复至 32 字节 |
 | 事件解析 | 事件类型在 `payload.t`，事件体在 `payload.d` |
-| 消息去重 | 相同 msg_id 会重复推送，用 KV 去重 |
+| 消息去重 | 相同 msg_id 会重复推送，用 `webhook_events` + 租约锁去重 |
 
 ### 签名算法已实测验证 ✅
+
 ```
 secret=DG5g3B4j9X2KOErG, plain_token=Arq0D5A61EgUu4OxUvOp, event_ts=1725442341
-生成的签名与官方 DEMO 逐字符完全一致 (MATCH=true)
+WebCrypto 算出的签名与官方 DEMO 逐字符一致 (MATCH=true)
 ```
 
 ## 注意事项
-- **调试可跳过验签**：`wrangler.toml` 里 `SKIP_SIGNATURE="true"`，生产务必改回 `"false"`。
-- **API 域名**：代码用 `api.sgroup.qq.com`；若后台开启了 IP 白名单或报 403，改用 `https://api.bot.qq.com`。
-- **Worker 出图字体**：Workers 无系统字体，中文可能缺字；渲染失败时自动降级为前端表格。要稳定出图需内嵌字体。
+
+- **调试可跳过验签**：在 D1 `settings` 表里写 `SKIP_SIGNATURE`=`true`，生产务必删掉。
+- **API 域名**：代码用 `api.sgroup.qq.com`；若后台开了 IP 白名单或报 403，把 `QQ_API_BASE` 改成 `https://api.bot.qq.com`。
 - **主动消息配额**：Bot 维度 60/qpm（认证）或 30/qpm（未认证）；单群 20/qpm、每天最多 1000 条。
-- **并发测速上限**：单次最多 30 个模型（`model_test.rs` 的 `.take(30)`）。
+- **并发测速上限**：单次最多 30 个模型，并发 5，单个超时 15 秒。
 - **主体要求**：群场景默认仅企业主体可开发，个人主体仅频道场景。
+- **关于出图**：早期版本用 Rust + resvg 渲染 PNG 报告，wasm 有 4.4 MB（gzip 1.19 MiB），
+  超出免费版 Workers 的 1 MiB 上限，已改为纯文本报告。若确实需要图片，可升级到付费版
+  （10 MiB 上限）后引入 `workers-og` 之类方案。

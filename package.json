@@ -1,0 +1,18 @@
+{
+  "name": "qbot-ai",
+  "version": "0.2.0",
+  "private": true,
+  "description": "QQ 官方机器人（Cloudflare Workers + TypeScript + D1 + KV + Queues）",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261104.1",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,24 +1,27 @@
-name = "qqbot"
-main = "build/worker/shim.mjs"
-compatibility_date = "2024-09-23"
+name = "qbot-ai"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
 
 # 填你自己的 Cloudflare account id（wrangler whoami 可以查）
 # account_id = ""
 
-[build]
-command = "bash build.sh"
+# 把 .html 当文本导入，管理台页面直接内嵌进 Worker
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = true
 
 # 数据库：wrangler d1 create qbot 之后把 database_id 填进来
 [[d1_databases]]
 binding = "DB"
 database_name = "qbot"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "c218fba1-3074-4611-8027-be905b19658c"
 migrations_dir = "migrations"
 
 # KV：wrangler kv namespace create KV 之后把 id 填进来
 [[kv_namespaces]]
 binding = "KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "a4fad0f88b3f433199a6c02185705961"
 
 [vars]
 QQ_API_BASE = "https://api.sgroup.qq.com"
@@ -36,5 +39,5 @@ max_retries = 3
 retry_delay = 15
 max_concurrency = 2
 
-# 注意：QQ_APP_ID / QQ_APP_SECRET / ADMIN_TOKEN 都不用写在这里，
+# 注意：QQ_APP_ID / QQ_APP_SECRET 都不用写在这里，
 # 打开部署后的网页，在「首次初始化」里填就行。填完存进 D1。

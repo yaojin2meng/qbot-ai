@@ -1,9 +1,6 @@
-/target
-/build
-/.wrangler
-node_modules
-*.wasm
+node_modules/
+dist/
+.wrangler/
 .dev.vars
-.backup/
-.DS_Store
 *.log
+.DS_Store
