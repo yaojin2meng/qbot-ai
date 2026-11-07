@@ -73,6 +73,21 @@ function configPair(baseUrl: string, key: string): { base: string; key: string }
 }
 
 /**
+ * 判断一段文本是不是「连接信息」形态：带 url + key 字段的 JSON 对象。
+ *
+ * 用于群里直接粘 new-api / one-api 的连接信息（形如
+ * `{"key":"sk-…","url":"https://…"}`）时自动触发测速。
+ * 只认这种特征明显的 JSON，不会因为普通链接、或提到「sk-」就误触发。
+ */
+export function looksLikeConfigPayload(text: string): boolean {
+  if (text.length === 0 || text.length > 4096) return false;
+  const open = text.indexOf('{');
+  const close = text.lastIndexOf('}');
+  if (open === -1 || close <= open) return false;
+  return /"(?:key|api_key)"\s*:/.test(text) && /"(?:url|base_url)"\s*:/.test(text);
+}
+
+/**
  * 支持三种写法：JSON、两行带标签、或空格分隔的 URL + Key。
  */
 export function extractApiAndKey(text: string): { base: string; key: string } | null {

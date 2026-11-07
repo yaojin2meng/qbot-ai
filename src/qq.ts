@@ -307,15 +307,21 @@ async function handleGroupMessage(event: GroupAtMessage, env: Env): Promise<void
     return;
   }
 
-  // 只有以「测速」开头的消息才当测速指令，避免群里随口贴个链接就触发。
-  if (text.startsWith('测速') && /^\s/.test(text.slice(2))) {
-    const rest = text.slice(2).trim();
-    const parsed = modelTest.extractApiAndKey(rest);
+  // 两种触发方式：
+  //   1) 显式指令「测速 <URL> <Key>」；
+  //   2) 直接粘 new-api / one-api 的连接信息，形如
+  //      {"_type":"newapi_channel_conn","key":"sk-…","url":"https://…"}。
+  // 以前只认第 1 种，粘 JSON 会走到这里什么都没发生（群里看起来就是「没反应」）。
+  const explicit = text.startsWith('测速') && /^\s/.test(text.slice(2));
+  const autoJson = !explicit && modelTest.looksLikeConfigPayload(text);
+  if (explicit || autoJson) {
+    const parsed = modelTest.extractApiAndKey(explicit ? text.slice(2).trim() : text);
     if (!parsed) {
       await sendGroup(env, event.group_openid, {
         msg_type: 0,
-        content:
-          '没认出 API 地址或 Key。格式：测速 <Base URL> <API Key>，例如\n测速 https://api.deepseek.com/v1 sk-xxxx',
+        content: explicit
+          ? '没认出 API 地址或 Key。格式：测速 <Base URL> <API Key>，例如\n测速 https://api.deepseek.com/v1 sk-xxxx'
+          : '识别到 API 连接信息，但 URL 或 Key 不合法：只支持公网 HTTPS 域名（不能是 IP、localhost、带账号密码或带 query 的地址）。',
         msg_id: event.id,
         msg_seq: 1,
       });

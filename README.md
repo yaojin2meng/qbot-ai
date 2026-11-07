@@ -86,14 +86,22 @@ schema 只在 `src/schema.ts` 一处维护。已经用旧 migration 建过表的
 npx wrangler secret put QQ_APP_ID
 npx wrangler secret put QQ_APP_SECRET
 ```
-
 ## 群内使用
+
+**必须 @ 机器人**，否则 QQ 不会推送 `GROUP_AT_MESSAGE_CREATE` 事件，机器人收不到任何东西。
 
 ```
 投票 周末去爬山吗 10
 测速 https://api.deepseek.com/v1 sk-xxxx
 帮助
 ```
+
+测速还支持直接粘 new-api / one-api 的连接信息（带 `url` + `key` 字段的 JSON），不用加「测速」前缀，会自动识别并开始测速：
+
+```json
+{"_type":"newapi_channel_conn","key":"sk-xxxx","url":"https://your-relay.example.com"}
+```
+
 
 ## 关键实现说明
 
