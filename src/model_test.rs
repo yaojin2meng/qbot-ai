@@ -1,22 +1,11 @@
 use futures_util::{stream, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use worker::*;
 
 const MAX_MODELS: usize = 30;
 const CONCURRENCY: usize = 5;
 const REQUEST_TIMEOUT: u64 = 15;
-
-#[derive(Deserialize)]
-struct ConfigRow {
-    id: i64,
-    base_url: String,
-    api_key: String,
-}
-#[derive(Deserialize)]
-struct TestBody {
-    models: Option<Vec<String>>,
-}
 
 fn now_ms() -> i64 {
     Date::now().as_millis() as i64
@@ -155,7 +144,7 @@ pub async fn test_and_reply_group(
             })).await;
         }
     };
-    let results = test_models(0, &base, key, models).await;
+    let results = test_models(&base, key, models).await;
     if let Some(bytes) = crate::render::render_results_png_bytes(&results) {
         match upload_and_send_group_image(env, group, msg, bytes).await {
             Ok(()) => return Ok(()),
@@ -212,95 +201,6 @@ async fn upload_and_send_group_image(
     .await
 }
 
-fn route_id(ctx: &RouteContext<()>) -> Option<i64> {
-    ctx.param("id")
-        .and_then(|s| s.parse().ok())
-        .filter(|id| *id > 0)
-}
-
-async fn load_config(env: &Env, id: i64) -> Result<Option<ConfigRow>> {
-    env.d1("DB")?
-        .prepare("SELECT id, base_url, api_key FROM api_configs WHERE id=?1")
-        .bind(&[id.into()])?
-        .first(None)
-        .await
-}
-
-pub async fn list_models(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    let id = match route_id(&ctx) {
-        Some(id) => id,
-        None => return Response::error("invalid id", 400),
-    };
-    let cfg = match load_config(&ctx.env, id).await? {
-        Some(c) => c,
-        None => return Response::error("config not found", 404),
-    };
-    match fetch_model_list(&cfg.base_url, &cfg.api_key).await {
-        Ok(models) => Response::from_json(&json!({"ok": true, "models": models})),
-        Err(_) => Response::error("上游模型列表请求失败，请检查地址、Key 和权限", 502),
-    }
-}
-
-pub async fn run_test(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    let id = match route_id(&ctx) {
-        Some(id) => id,
-        None => return Response::error("invalid id", 400),
-    };
-    let cfg = match load_config(&ctx.env, id).await? {
-        Some(c) => c,
-        None => return Response::error("config not found", 404),
-    };
-    let body: TestBody = match req.json().await {
-        Ok(body) => body,
-        Err(_) => return Response::error("invalid JSON", 400),
-    };
-    if body.models.as_ref().is_some_and(|models| {
-        models.len() > MAX_MODELS || models.iter().any(|m| m.is_empty() || m.len() > 200)
-    }) {
-        return Response::error("最多 30 个模型，模型名称长度为 1..200 字节", 400);
-    }
-    let lease_key = format!("web-test:{id}");
-    let owner = match crate::security::acquire(&ctx.env, &lease_key, 600).await? {
-        Some(owner) => owner,
-        None => return Response::error("该配置正在测速或处于冷却期，请稍后重试", 429),
-    };
-    let result = run_config_test(&ctx.env, cfg, body).await;
-    // Successful tests keep a cooldown lease to prevent accidentally burning API credits.
-    if result.is_err()
-        && crate::security::release(&ctx.env, &lease_key, &owner)
-            .await
-            .is_err()
-    {
-        console_error!("test lease release failed");
-    }
-    result
-}
-
-async fn run_config_test(env: &Env, cfg: ConfigRow, body: TestBody) -> Result<Response> {
-    let base = normalize_base_url(&cfg.base_url)?;
-    let models = match body.models {
-        Some(models) if !models.is_empty() => models,
-        _ => fetch_model_list(&base, &cfg.api_key).await?,
-    };
-    if models.is_empty() {
-        return Err(Error::from("upstream model list is empty"));
-    }
-    let results = test_models(cfg.id, &base, &cfg.api_key, models).await;
-    let db = env.d1("DB")?;
-    let mut statements = Vec::new();
-    for r in &results {
-        statements.push(db.prepare(
-            "INSERT INTO model_tests (config_id,model,ok,latency_ms,error,prompt,answer,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"
-        ).bind(&[r.config_id.into(), r.model.clone().into(), (r.ok as i64).into(), r.latency_ms.into(),
-            r.error.clone().unwrap_or_default().into(), r.prompt.clone().into(), r.answer.clone().into(), now_ms().into()])?);
-    }
-    db.batch(statements).await?;
-    Response::from_json(&json!({
-        "ok": true, "results": results, "image": crate::render::render_results_png(&results),
-    }))
-}
-
 async fn fetch_model_list(base: &str, key: &str) -> Result<Vec<String>> {
     let base = normalize_base_url(base)?;
     let headers = Headers::new();
@@ -330,13 +230,13 @@ async fn fetch_model_list(base: &str, key: &str) -> Result<Vec<String>> {
     Ok(models)
 }
 
-async fn test_models(id: i64, base: &str, key: &str, models: Vec<String>) -> Vec<ModelResult> {
+async fn test_models(base: &str, key: &str, models: Vec<String>) -> Vec<ModelResult> {
     // buffer_unordered polls up to CONCURRENCY futures at once; a Vec<Future> alone does not.
     let futures = models
         .into_iter()
         .take(MAX_MODELS)
         .enumerate()
-        .map(|(index, model)| async move { (index, test_one(id, base, key, &model).await) });
+        .map(|(index, model)| async move { (index, test_one(base, key, &model).await) });
     let mut results: Vec<_> = stream::iter(futures)
         .buffer_unordered(CONCURRENCY)
         .collect()
@@ -347,8 +247,6 @@ async fn test_models(id: i64, base: &str, key: &str, models: Vec<String>) -> Vec
 
 #[derive(Serialize, Clone)]
 pub struct ModelResult {
-    #[serde(skip)]
-    pub config_id: i64,
     pub model: String,
     pub ok: bool,
     pub latency_ms: Option<i64>,
@@ -391,7 +289,7 @@ fn random_prompt() -> String {
     }
 }
 
-async fn test_one(id: i64, base: &str, key: &str, model: &str) -> ModelResult {
+async fn test_one(base: &str, key: &str, model: &str) -> ModelResult {
     let prompt = random_prompt();
     let payload = json!({"model": model, "messages": [{"role":"user", "content":prompt}],
         "temperature":0.2, "max_tokens":64, "stream":false});
@@ -401,7 +299,7 @@ async fn test_one(id: i64, base: &str, key: &str, model: &str) -> ModelResult {
         .is_err()
         || headers.set("Content-Type", "application/json").is_err()
     {
-        return fail(id, model, &prompt, "请求头无效".into());
+        return fail(model, &prompt, "请求头无效".into());
     }
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
@@ -410,15 +308,15 @@ async fn test_one(id: i64, base: &str, key: &str, model: &str) -> ModelResult {
         .with_body(Some(payload.to_string().into()));
     let req = match Request::new_with_init(&format!("{base}/chat/completions"), &init) {
         Ok(req) => req,
-        Err(_) => return fail(id, model, &prompt, "构造请求失败".into()),
+        Err(_) => return fail(model, &prompt, "构造请求失败".into()),
     };
     let start = now_ms();
     let (status, value) = match crate::http::fetch_json(req, REQUEST_TIMEOUT).await {
         Ok(result) => result,
-        Err(_) => return fail(id, model, &prompt, "请求失败/超时/非 JSON 响应".into()),
+        Err(_) => return fail(model, &prompt, "请求失败/超时/非 JSON 响应".into()),
     };
     if status != 200 {
-        return fail(id, model, &prompt, format!("HTTP {status}"));
+        return fail(model, &prompt, format!("HTTP {status}"));
     }
     let content = value
         .pointer("/choices/0/message/content")
@@ -426,10 +324,9 @@ async fn test_one(id: i64, base: &str, key: &str, model: &str) -> ModelResult {
         .unwrap_or("")
         .trim();
     if content.is_empty() {
-        return fail(id, model, &prompt, "空回（返回内容为空）".into());
+        return fail(model, &prompt, "空回（返回内容为空）".into());
     }
     ModelResult {
-        config_id: id,
         model: model.into(),
         ok: true,
         latency_ms: Some(now_ms() - start),
@@ -439,9 +336,8 @@ async fn test_one(id: i64, base: &str, key: &str, model: &str) -> ModelResult {
     }
 }
 
-fn fail(id: i64, model: &str, prompt: &str, error: String) -> ModelResult {
+fn fail(model: &str, prompt: &str, error: String) -> ModelResult {
     ModelResult {
-        config_id: id,
         model: model.into(),
         ok: false,
         latency_ms: None,

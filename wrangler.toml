@@ -1,28 +1,29 @@
 name = "qqbot"
-account_id = "75609a64ee5df8b79e19e72dc71febd6"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-09-23"
+
+# 填你自己的 Cloudflare account id（wrangler whoami 可以查）
+# account_id = ""
 
 [build]
 command = "bash build.sh"
 
+# 数据库：wrangler d1 create qbot 之后把 database_id 填进来
 [[d1_databases]]
 binding = "DB"
 database_name = "qbot"
-database_id = "c218fba1-3074-4611-8027-be905b19658c"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 migrations_dir = "migrations"
 
-# KV 用于 QQ AccessToken 缓存（必需）
+# KV：wrangler kv namespace create KV 之后把 id 填进来
 [[kv_namespaces]]
 binding = "KV"
-id = "a4fad0f88b3f433199a6c02185705961"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 
 [vars]
-# QQ_APP_ID、QQ_APP_SECRET、ADMIN_TOKEN 使用 wrangler secret 配置
 QQ_API_BASE = "https://api.sgroup.qq.com"
-SKIP_SIGNATURE = "false"
 
-# 先创建队列: npx wrangler queues create qqbot-events
+# 先创建队列：npx wrangler queues create qqbot-events
 [[queues.producers]]
 binding = "EVENTS"
 queue = "qqbot-events"
@@ -34,3 +35,6 @@ max_batch_timeout = 1
 max_retries = 3
 retry_delay = 15
 max_concurrency = 2
+
+# 注意：QQ_APP_ID / QQ_APP_SECRET / ADMIN_TOKEN 都不用写在这里，
+# 打开部署后的网页，在「首次初始化」里填就行。填完存进 D1。

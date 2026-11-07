@@ -1,14 +1,14 @@
 use serde_json::{json, Value};
 use worker::*;
 
-fn api_origin(env: &Env) -> Result<String> {
-    let origin = env
-        .var("QQ_API_BASE")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "https://api.sgroup.qq.com".into());
-    let origin = origin.trim_end_matches('/');
+async fn api_origin(env: &Env) -> Result<String> {
+    let origin = crate::config::get_or(env, crate::config::KEY_API_BASE, crate::config::DEFAULT_API_BASE)
+        .await;
+    let origin = origin.trim().trim_end_matches('/');
     if !["https://api.sgroup.qq.com", "https://api.bot.qq.com"].contains(&origin) {
-        return Err(Error::from("QQ_API_BASE must be an official QQ API origin"));
+        return Err(Error::from(
+            "QQ_API_BASE 必须是 api.sgroup.qq.com 或 api.bot.qq.com",
+        ));
     }
     Ok(origin.to_string())
 }
@@ -23,18 +23,11 @@ pub async fn request(env: &Env, method: Method, path: &str, body: Value) -> Resu
         .with_headers(headers)
         .with_redirect(RequestRedirect::Error)
         .with_body(Some(body.to_string().into()));
-    let req = Request::new_with_init(&format!("{}{path}", api_origin(env)?), &init)?;
+    let req = Request::new_with_init(&format!("{}{path}", api_origin(env).await?), &init)?;
     let (status, value) = crate::http::fetch_json(req, 10).await?;
     if status == 401 {
-        let app_id = env.secret("QQ_APP_ID")?.to_string();
-        if let Ok(kv) = env.kv("KV") {
-            if kv
-                .delete(&format!("qq_access_token:{app_id}"))
-                .await
-                .is_err()
-            {
-                console_error!("could not invalidate QQ token cache");
-            }
+        if let Err(e) = invalidate_token(env).await {
+            console_error!("could not invalidate QQ token cache: {e}");
         }
     }
     let code = value
@@ -87,10 +80,14 @@ pub fn valid_id(value: &str) -> bool {
 }
 
 async fn get_access_token(env: &Env) -> Result<String> {
-    let app_id = env.secret("QQ_APP_ID")?.to_string();
-    let secret = env.secret("QQ_APP_SECRET")?.to_string();
+    let app_id = crate::config::get(env, crate::config::KEY_APP_ID)
+        .await
+        .ok_or_else(|| Error::from("未配置 QQ_APP_ID，请打开网页配置台填写"))?;
+    let secret = crate::config::get(env, crate::config::KEY_APP_SECRET)
+        .await
+        .ok_or_else(|| Error::from("未配置 QQ_APP_SECRET，请打开网页配置台填写"))?;
     if app_id.trim().is_empty() || secret.is_empty() {
-        return Err(Error::from("QQ credentials are empty"));
+        return Err(Error::from("QQ 凭据为空，请打开网页配置台填写"));
     }
     let kv = env.kv("KV")?;
     let cache_key = format!("qq_access_token:{app_id}");
@@ -113,13 +110,15 @@ async fn get_access_token(env: &Env) -> Result<String> {
     let req = Request::new_with_init("https://bots.qq.com/app/getAppAccessToken", &init)?;
     let (status, value) = crate::http::fetch_json(req, 8).await?;
     if status != 200 {
-        return Err(Error::from(format!("QQ token endpoint HTTP {status}")));
+        return Err(Error::from(format!(
+            "QQ 取 AccessToken 失败（HTTP {status}），请检查 QQ_APP_ID / QQ_APP_SECRET"
+        )));
     }
     let token = value
         .get("access_token")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::from("QQ token endpoint returned no access_token"))?
+        .ok_or_else(|| Error::from("QQ 返回里没有 access_token，请检查 QQ_APP_ID / QQ_APP_SECRET"))?
         .to_string();
     let expires = value
         .get("expires_in")
@@ -138,4 +137,63 @@ async fn get_access_token(env: &Env) -> Result<String> {
         }
     }
     Ok(token)
+}
+
+async fn invalidate_token(env: &Env) -> Result<()> {
+    let app_id = crate::config::get(env, crate::config::KEY_APP_ID)
+        .await
+        .unwrap_or_default();
+    if app_id.is_empty() {
+        return Ok(());
+    }
+    let kv = env.kv("KV")?;
+    kv.delete(&format!("qq_access_token:{app_id}")).await?;
+    Ok(())
+}
+
+/// 配置台用：走一遍真实的取 token 流程，验证 AppID / AppSecret 是否可用。
+/// 每次都跳过缓存直连上游，避免用旧 token 给出假阳性。
+pub async fn probe(env: &Env) -> Result<()> {
+    let app_id = crate::config::get(env, crate::config::KEY_APP_ID)
+        .await
+        .ok_or_else(|| Error::from("还没有填写 QQ_APP_ID"))?;
+    let secret = crate::config::get(env, crate::config::KEY_APP_SECRET)
+        .await
+        .ok_or_else(|| Error::from("还没有填写 QQ_APP_SECRET"))?;
+    if app_id.trim().is_empty() || secret.is_empty() {
+        return Err(Error::from("QQ_APP_ID / QQ_APP_SECRET 不能为空"));
+    }
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_redirect(RequestRedirect::Error)
+        .with_body(Some(
+            json!({"appId": app_id, "clientSecret": secret})
+                .to_string()
+                .into(),
+        ));
+    let req = Request::new_with_init("https://bots.qq.com/app/getAppAccessToken", &init)?;
+    let (status, value) = crate::http::fetch_json(req, 8).await?;
+    if status != 200 {
+        return Err(Error::from(format!("QQ 返回 HTTP {status}")));
+    }
+    if value
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+    {
+        // 验证通过顺手刷新缓存，省一次往返。
+        invalidate_token(env).await?;
+        Ok(())
+    } else {
+        let msg = value
+            .get("message")
+            .or_else(|| value.get("msg"))
+            .and_then(Value::as_str)
+            .unwrap_or("返回里没有 access_token");
+        Err(Error::from(msg.to_string()))
+    }
 }

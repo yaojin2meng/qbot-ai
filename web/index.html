@@ -3,273 +3,320 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>qqbot 管理台</title>
+<title>qbot</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; }
-  .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
-  h1 { font-size: 24px; margin-bottom: 4px; }
-  .sub { color: #94a3b8; font-size: 13px; margin-bottom: 24px; }
-  .card { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid #334155; }
-  .card h2 { font-size: 17px; margin-bottom: 14px; color: #f1f5f9; }
-  input, select { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 9px 12px; border-radius: 8px; font-size: 14px; width: 100%; margin-bottom: 10px; }
-  input:focus { outline: none; border-color: #3b82f6; }
-  button { background: #3b82f6; color: #fff; border: none; padding: 9px 16px; border-radius: 8px; font-size: 14px; cursor: pointer; transition: .15s; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0f172a; color: #e2e8f0; line-height: 1.6;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 28px 18px 60px; }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: .2px; }
+  .sub { color: #64748b; font-size: 13px; margin: 4px 0 26px; }
+
+  .card {
+    background: #1e293b;
+    border: 1px solid #263449; border-radius: 14px;
+    padding: 20px 20px 22px; margin-bottom: 16px;
+  }
+  .card > h2 {
+    font-size: 15px; font-weight: 600; color: #f1f5f9;
+    margin-bottom: 4px; display: flex; align-items: center; gap: 8px;
+  }
+  .card > .desc { color: #64748b; font-size: 12.5px; margin-bottom: 16px; }
+
+  label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; }
+  label .req { color: #f87171; margin-left: 2px; }
+  .field { margin-bottom: 14px; }
+  .hint { color: #52606f; font-size: 12px; margin-top: 5px; }
+  .hint a { color: #60a5fa; text-decoration: none; }
+  .hint a:hover { text-decoration: underline; }
+
+  input[type=text], input[type=password], select {
+    width: 100%; background: #0f172a; border: 1px solid #2b3a4f;
+    color: #e2e8f0; padding: 10px 12px; border-radius: 9px;
+    font-size: 14px; font-family: inherit; transition: border-color .15s;
+  }
+  input:focus, select:focus { outline: none; border-color: #3b82f6; }
+  input::placeholder { color: #475569; }
+
+  button {
+    background: #3b82f6; color: #fff; border: none;
+    padding: 10px 18px; border-radius: 9px; font-size: 14px;
+    font-family: inherit; cursor: pointer; transition: background .15s;
+  }
   button:hover { background: #2563eb; }
-  button:disabled { background: #475569; cursor: not-allowed; }
-  button.ghost { background: #334155; }
-  button.danger { background: #dc2626; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; }
-  .grow { flex: 1; min-width: 160px; }
-  .config-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #334155; }
-  .config-item:last-child { border-bottom: none; }
-  .config-item .meta { font-size: 13px; }
-  .config-item .name { font-weight: 600; }
-  .config-item .url { color: #64748b; font-size: 12px; }
+  button:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+  button.ghost { background: #263449; color: #cbd5e1; }
+  button.ghost:hover { background: #334155; }
+  button.small { padding: 6px 12px; font-size: 12.5px; }
+
+  .row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+  .row .grow { flex: 1; min-width: 200px; }
+
+  .status-item {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 9px 0; border-bottom: 1px solid #22303f;
+  }
+  .status-item:last-child { border-bottom: none; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 7px; flex: 0 0 8px; }
+  .dot.ok { background: #22c55e; box-shadow: 0 0 6px #22c55e77; }
+  .dot.miss { background: #ef4444; }
+  .dot.opt { background: #64748b; }
+  .status-item .k { color: #cbd5e1; font-weight: 500; }
+  .status-item .v { color: #64748b; font-size: 12px; }
+
+  .msg {
+    padding: 11px 14px; border-radius: 9px; font-size: 13.5px;
+    margin-bottom: 14px; display: none; white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.show { display: block; }
+  .msg.ok { background: #14361f; border: 1px solid #1f6b39; color: #86efac; }
+  .msg.err { background: #3a1618; border: 1px solid #7f2a2e; color: #fca5a5; }
+  .msg.info { background: #1a2b40; border: 1px solid #2c4a6b; color: #93c5fd; }
+
+  code {
+    background: #0f172a; border: 1px solid #263449;
+    padding: 1.5px 6px; border-radius: 5px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12.5px; color: #93c5fd;
+  }
+  .hidden { display: none !important; }
   .muted { color: #64748b; font-size: 13px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #334155; }
-  th { color: #94a3b8; font-weight: 500; }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
-  .badge.ok { background: #16a34a; color: #fff; }
-  .badge.fail { background: #dc2626; color: #fff; }
-  .badge.empty { background: #d97706; color: #fff; }
-  #testImage img { max-width: 100%; border-radius: 10px; margin-top: 12px; }
-  #log { font-family: monospace; font-size: 12px; color: #94a3b8; white-space: pre-wrap; max-height: 200px; overflow: auto; }
-  .chip { display: inline-block; background: #0f172a; padding: 2px 8px; border-radius: 6px; font-size: 12px; margin: 2px; border: 1px solid #334155; }
+
+  .banner {
+    display: flex; align-items: center; gap: 12px;
+    background: #14361f; border: 1px solid #1f6b39;
+    border-radius: 14px; padding: 18px 20px; margin-bottom: 16px;
+  }
+  .banner .icon { font-size: 30px; line-height: 1; }
+  .banner .t { color: #86efac; font-size: 16px; font-weight: 600; }
+  .banner .d { color: #4d7c5f; font-size: 12.5px; margin-top: 2px; }
+
+  ul.ticks { list-style: none; font-size: 13.5px; }
+  ul.ticks li { padding: 6px 0 6px 22px; position: relative; color: #cbd5e1; }
+  ul.ticks li::before { content: "→"; position: absolute; left: 0; color: #475569; }
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>🤖 qqbot 管理台</h1>
-  <div class="sub">QQ 机器人 · 模型测速 · 投票管理</div>
+<div class="wrap">
+  <h1>qbot</h1>
+  <div class="sub">QQ 群机器人 · 投票与模型测速</div>
 
-  <div class="card">
-    <h2>管理台登录</h2>
-    <input id="adminToken" type="password" autocomplete="off" placeholder="输入 ADMIN_TOKEN（不会持久保存）">
-    <button onclick="login()">登录 / 刷新</button>
-    <button class="ghost" onclick="logout()">退出</button>
-    <div id="authStatus" class="muted">请先登录，令牌仅保留在当前页面内存中。</div>
-  </div>
-  <!-- API 配置 -->
-  <div class="card">
-    <h2>① 添加 API 配置</h2>
-    <div class="row">
-      <input class="grow" id="cfgName" placeholder="名称（如 DeepSeek）">
-      <input class="grow" id="cfgUrl" placeholder="Base URL（如 https://api.deepseek.com/v1）">
-      <input class="grow" id="cfgKey" placeholder="API Key" type="password">
-    </div>
-    <button onclick="addConfig()">保存配置</button>
-  </div>
+  <div id="msg" class="msg"></div>
 
-  <!-- 配置列表 -->
-  <div class="card">
-    <h2>② 已有配置</h2>
-    <div id="configList"><div class="muted">加载中…</div></div>
-  </div>
+  <!-- ============ 状态 A：首次初始化 ============ -->
+  <div id="setupCard" class="card hidden">
+    <h2>初始化</h2>
+    <div class="desc">填入 QQ 开放平台的凭据，保存后机器人即可使用。这两项只需填写一次。</div>
 
-  <!-- 测速 -->
-  <div class="card">
-    <h2>③ 模型测速</h2>
-    <div class="row" style="align-items:flex-end;">
-      <div class="grow">
-        <label class="muted">选择配置</label>
-        <select id="testConfig" onchange="loadModels()"><option value="">-- 选择 --</option></select>
+    <div class="field">
+      <label>QQ_APP_ID <span class="req">*</span></label>
+      <input type="text" id="setupAppId" placeholder="例如 102xxxxxx" autocomplete="off">
+      <div class="hint">
+        <a href="https://q.qq.com/bot/#/developer/developer-setting" target="_blank" rel="noopener">QQ 开放平台 → 机器人 → 开发设置</a> → AppID
       </div>
-      <button class="ghost" onclick="loadModels()">拉取模型</button>
-      <button id="testButton" onclick="runTest()">开始测速</button>
     </div>
-    <div id="modelChips" style="margin:10px 0;"></div>
-    <div id="log"></div>
-    <div id="testImage"></div>
+
+    <div class="field">
+      <label>QQ_APP_SECRET <span class="req">*</span></label>
+      <input type="password" id="setupAppSecret" placeholder="AppSecret" autocomplete="off">
+      <div class="hint">同一页面的 AppSecret。取 AccessToken 和回调验签都用它，点「显示」才能复制。</div>
+    </div>
+
+    <div class="field">
+      <label>QQ API 域名</label>
+      <select id="setupApiBase">
+        <option value="https://api.sgroup.qq.com">https://api.sgroup.qq.com（默认）</option>
+        <option value="https://api.bot.qq.com">https://api.bot.qq.com（报 403 时用这个）</option>
+      </select>
+      <div class="hint">不确定就保持默认，之后遇到 403 再改。</div>
+    </div>
+
+    <button id="setupBtn" onclick="doSetup()">保存并启用</button>
   </div>
 
-  <!-- 投票记录 -->
-  <div class="card">
-    <h2>④ 投票记录</h2>
-    <div id="pollList"><div class="muted">加载中…</div></div>
+  <!-- ============ 状态 B：已完成初始化 ============ -->
+  <div id="doneBanner" class="banner hidden">
+    <span class="icon">✅</span>
+    <div>
+      <div class="t">机器人已启用</div>
+      <div class="d">凭据已保存，投票与测速均在 QQ 群内使用。</div>
+    </div>
+  </div>
+
+  <div id="doneCard" class="card hidden">
+    <h2>QQ 开放平台配置</h2>
+    <div class="desc">把下面几项填到开放平台，机器人就能收到群消息。</div>
+
+    <div class="field">
+      <label>回调地址</label>
+      <div class="row">
+        <input class="grow" type="text" id="webhookUrl" readonly>
+        <button class="ghost small" type="button" onclick="copyWebhook()">复制</button>
+      </div>
+      <div class="hint">填到「开发设置 → 回调配置 → 回调地址」。</div>
+    </div>
+
+    <div class="field">
+      <label>要订阅的事件</label>
+      <div id="eventList" class="muted">—</div>
+    </div>
+
+    <div class="field">
+      <label>要申请的权限</label>
+      <div id="permList" class="muted">—</div>
+    </div>
+
+    <div class="row">
+      <button onclick="verify()">测试 QQ 凭据</button>
+    </div>
+    <div class="hint" style="margin-top:8px">向 QQ 请求一次 AccessToken，确认凭据有效。</div>
+  </div>
+
+  <div id="cmdCard" class="card hidden">
+    <h2>群里怎么用</h2>
+    <div class="desc">在群里 @ 机器人发送以下指令。</div>
+    <div id="cmdList" class="muted">—</div>
+  </div>
+
+  <div id="statusCard" class="card hidden">
+    <h2>运行状态</h2>
+    <div class="desc">一眼看出还差什么。</div>
+    <div id="statusList" class="status-list"><div class="muted">读取中…</div></div>
   </div>
 </div>
 
 <script>
-const API = '';
+const $ = id => document.getElementById(id);
 
-let adminToken = '';
-async function login() {
-  adminToken = document.getElementById('adminToken').value.trim();
-  document.getElementById('adminToken').value = '';
-  if (!adminToken) return alert('请输入 ADMIN_TOKEN');
-  const r = await api('/api/configs');
-  if (!r.ok) { adminToken = ''; return alert('登录失败：' + (r.error || '请检查令牌')); }
-  document.getElementById('authStatus').textContent = '已登录（刷新页面后需重新输入）';
-  await Promise.all([loadConfigs(), loadPolls()]);
-}
-function logout() {
-  adminToken = '';
-  document.getElementById('adminToken').value = '';
-  document.getElementById('authStatus').textContent = '已退出';
-  document.getElementById('configList').textContent = '';
-  document.getElementById('pollList').textContent = '';
-  document.getElementById('log').textContent = '';
-  document.getElementById('testImage').textContent = '';
-  document.getElementById('modelChips').textContent = '';
-  document.getElementById('testConfig').innerHTML = '<option value="">-- 选择 --</option>';
-}
-async function api(path, opts = {}) {
-  if (!adminToken) return { ok: false, error: '请先登录' };
-  try {
-    const headers = new Headers(opts.headers || {});
-    headers.set('Authorization', 'Bearer ' + adminToken);
-    const res = await fetch(API + path, { ...opts, headers, cache: 'no-store' });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { ok: false, error: text || ('HTTP ' + res.status) }; }
-    if (!res.ok) data.ok = false;
-    return data;
-  } catch { return { ok: false, error: '网络请求失败，请检查连接' }; }
-}
-
-function log(msg) {
-  const el = document.getElementById('log');
-  el.textContent += msg + '\n';
-  el.scrollTop = el.scrollHeight;
-}
-
-// ---- 配置 ----
-async function loadConfigs() {
-  const data = await api('/api/configs');
-  const list = document.getElementById('configList');
-  const sel = document.getElementById('testConfig');
-  sel.innerHTML = '<option value="">-- 选择 --</option>';
-  if (!data.configs || data.configs.length === 0) {
-    list.innerHTML = '<div class="muted">暂无配置</div>';
-    return;
-  }
-  list.innerHTML = data.configs.map(c => `
-    <div class="config-item">
-      <div class="meta">
-        <div class="name">${esc(c.name)}</div>
-        <div class="url">${esc(c.base_url)} · key: ${esc(c.api_key)}</div>
-      </div>
-      <button class="danger" onclick="delConfig(${c.id})">删除</button>
-    </div>`).join('');
-  data.configs.forEach(c => {
-    sel.innerHTML += `<option value="${c.id}">${esc(c.name)}</option>`;
-  });
-}
-
-async function addConfig() {
-  const name = document.getElementById('cfgName').value.trim();
-  const base_url = document.getElementById('cfgUrl').value.trim();
-  const api_key = document.getElementById('cfgKey').value.trim();
-  if (!base_url || !api_key) return alert('URL 和 Key 不能为空');
-  const r = await api('/api/configs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name || base_url, base_url, api_key })
-  });
-  if (r.ok) {
-    document.getElementById('cfgName').value = '';
-    document.getElementById('cfgUrl').value = '';
-    document.getElementById('cfgKey').value = '';
-    loadConfigs();
-  } else alert('保存失败: ' + JSON.stringify(r));
-}
-
-async function delConfig(id) {
-  if (!confirm('确认删除该配置？')) return;
-  const r = await api('/api/configs/' + id, { method: 'DELETE' });
-  if (!r.ok) return alert('删除失败：' + JSON.stringify(r));
-  loadConfigs();
-}
-
-// ---- 模型 ----
-async function loadModels() {
-  const id = document.getElementById('testConfig').value;
-  const chips = document.getElementById('modelChips');
-  chips.innerHTML = '';
-  if (!id) return;
-  log('拉取模型列表…');
-  const r = await api('/api/configs/' + id + '/models');
-  if (r.ok && r.models) {
-    log(`找到 ${r.models.length} 个模型`);
-    chips.innerHTML = r.models.map(m => `<span class="chip">${esc(m)}</span>`).join('');
-  } else {
-    log('拉取失败: ' + JSON.stringify(r));
-  }
-}
-
-async function runTest() {
-  const id = document.getElementById('testConfig').value;
-  if (!id) return alert('请先选择配置');
-  document.getElementById('log').textContent = '';
-  document.getElementById('testImage').innerHTML = '';
-  log('开始测速（并发 5，最多 30 个模型）；单个请求超时 15 秒，最多约两分钟。');
-  const button = document.getElementById('testButton');
-  button.disabled = true;
-  const r = await api('/api/configs/' + id + '/test', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({})
-  });
-  button.disabled = false;
-  if (!r.ok) { log('测速失败: ' + JSON.stringify(r)); return; }
-  renderResults(r.results);
-  if (typeof r.image === 'string' && r.image.startsWith('data:image/png;base64,')) {
-    document.getElementById('testImage').innerHTML = `<img src="${r.image}" alt="测速报告">`;
-    log('已生成测速报告图片');
-  } else {
-    log('图片生成未成功（环境缺字体时降级为表格）');
-  }
-}
-
-function renderResults(results) {
-  let html = '<table><tr><th>模型</th><th>状态</th><th>耗时/结果</th></tr>';
-  results.forEach(r => {
-    let badge = r.ok
-      ? '<span class="badge ok">成功</span>'
-      : (r.error && r.error.includes('空回') ? '<span class="badge empty">空回</span>'
-        : (r.error && r.error.includes('超时') ? '<span class="badge fail">超时</span>' : '<span class="badge fail">错误</span>'));
-    let detail = r.ok ? (r.latency_ms + ' ms') : esc((r.error || '').slice(0, 60));
-    html += `<tr><td>${esc(r.model)}</td><td>${badge}</td><td>${detail}</td></tr>`;
-  });
-  html += '</table>';
-  document.getElementById('log').innerHTML = html;
-}
-
-// ---- 投票 ----
-async function loadPolls() {
-  const data = await api('/api/polls');
-  const el = document.getElementById('pollList');
-  if (!data.polls || data.polls.length === 0) {
-    el.innerHTML = '<div class="muted">暂无投票</div>';
-    return;
-  }
-  let html = '<table><tr><th>主题</th><th>目标</th><th>赞成</th><th>反对</th><th>弃权</th><th>状态</th></tr>';
-  data.polls.forEach(p => {
-    const total = p.agree + p.disagree + p.abstain;
-    html += `<tr>
-      <td>${esc(p.topic)}</td>
-      <td>${total}/${p.target_count}</td>
-      <td style="color:#86efac">${p.agree}</td>
-      <td style="color:#fca5a5">${p.disagree}</td>
-      <td style="color:#fbbf24">${p.abstain}</td>
-      <td>${p.status === 'active' ? '进行中' : '已结束'}</td>
-    </tr>`;
-  });
-  html += '</table>';
-  el.innerHTML = html;
+function showMsg(text, kind) {
+  const el = $('msg');
+  el.textContent = text;
+  el.className = 'msg show ' + (kind || 'info');
+  if (kind !== 'err') setTimeout(() => { el.className = 'msg'; }, 6000);
 }
 
 function esc(s) {
-  const el = document.createElement('span');
-  el.textContent = String(s);
-  return el.innerHTML;
+  const d = document.createElement('span');
+  d.textContent = String(s == null ? '' : s);
+  return d.innerHTML;
 }
 
-// 登录前不访问管理 API。
-document.getElementById('configList').textContent = '请先登录';
-document.getElementById('pollList').textContent = '请先登录';
+async function call(path, opts) {
+  opts = opts || {};
+  const headers = new Headers(opts.headers || {});
+  try {
+    const res = await fetch(path, Object.assign({}, opts, { headers, cache: 'no-store' }));
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch (e) { data = { ok: false, message: text || ('HTTP ' + res.status) }; }
+    if (!res.ok && data.ok === undefined) data.ok = false;
+    return data;
+  } catch (e) {
+    return { ok: false, message: '网络请求失败：' + e.message };
+  }
+}
+
+// ---------- 状态 ----------
+async function loadStatus() {
+  const data = await call('/api/status');
+  if (!data || !data.fields) {
+    $('statusList').innerHTML = '<div class="muted">读取失败：' + esc((data && data.message) || '未知错误') + '</div>';
+    $('statusCard').classList.remove('hidden');
+    return;
+  }
+
+  if (data.setup_required) {
+    // 未初始化：只显示初始化表单
+    $('setupCard').classList.remove('hidden');
+    $('doneBanner').classList.add('hidden');
+    $('doneCard').classList.add('hidden');
+    $('cmdCard').classList.add('hidden');
+    $('statusCard').classList.add('hidden');
+    return;
+  }
+
+  // 已初始化
+  $('setupCard').classList.add('hidden');
+  $('doneBanner').classList.remove('hidden');
+  $('doneCard').classList.remove('hidden');
+  $('cmdCard').classList.remove('hidden');
+  $('statusCard').classList.remove('hidden');
+
+  const srcLabel = { d1: '已保存在数据库', secret: '来自 wrangler secret', var: '来自 wrangler.toml', missing: '未填写' };
+  let html = '';
+  data.fields.forEach(f => {
+    const dot = f.configured ? (f.required ? 'ok' : 'opt') : (f.required ? 'miss' : 'opt');
+    html += '<div class="status-item">'
+      + '<span class="dot ' + dot + '"></span>'
+      + '<div style="flex:1">'
+      + '<div class="k">' + esc(f.label) + (f.required ? '' : ' <span class="muted">（可选）</span>') + '</div>'
+      + '<div class="v">' + esc(srcLabel[f.source] || f.source) + '</div>'
+      + '</div></div>';
+  });
+
+  const b = data.bindings || {};
+  [['DB（D1 数据库）', b.db], ['KV（令牌缓存）', b.kv], ['Queues（事件队列）', b.queue]].forEach(pair => {
+    const ok = !!pair[1];
+    html += '<div class="status-item">'
+      + '<span class="dot ' + (ok ? 'ok' : 'miss') + '"></span>'
+      + '<div style="flex:1"><div class="k">' + esc(pair[0]) + '</div>'
+      + '<div class="v">' + (ok ? '已绑定' : '没绑定 —— 检查 wrangler.toml') + '</div></div></div>';
+  });
+  $('statusList').innerHTML = html;
+
+  // 接入指引
+  $('webhookUrl').value = location.origin + (data.webhook_path || '/qq/webhook');
+  $('eventList').innerHTML = (data.events || []).map(e => '<code>' + esc(e) + '</code>').join(' ');
+  $('permList').innerHTML = '<ul class="ticks">' + (data.permissions || []).map(p => '<li>' + esc(p) + '</li>').join('') + '</ul>';
+  $('cmdList').innerHTML = '<ul class="ticks">' + (data.commands || []).map(c => '<li><code>' + esc(c) + '</code></li>').join('') + '</ul>';
+}
+
+// ---------- 初始化 ----------
+async function doSetup() {
+  const appId = $('setupAppId').value.trim();
+  const appSecret = $('setupAppSecret').value.trim();
+  const apiBase = $('setupApiBase').value;
+
+  if (!appId) return showMsg('请填写 QQ_APP_ID', 'err');
+  if (!appSecret) return showMsg('请填写 QQ_APP_SECRET', 'err');
+
+  const btn = $('setupBtn');
+  btn.disabled = true;
+  const r = await call('/api/setup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: appId, app_secret: appSecret, api_base: apiBase })
+  });
+  btn.disabled = false;
+
+  if (!r.ok) return showMsg(r.message || '保存失败', 'err');
+
+  $('setupAppSecret').value = '';
+  showMsg('初始化完成。现在去 QQ 开放平台填回调地址，然后把机器人拉进群即可使用。', 'ok');
+  await loadStatus();
+}
+
+async function verify() {
+  showMsg('正在用当前凭据向 QQ 请求 AccessToken…', 'info');
+  const r = await call('/api/verify', { method: 'POST' });
+  showMsg(r.message || (r.ok ? '凭据可用' : '验证失败'), r.ok ? 'ok' : 'err');
+}
+
+function copyWebhook() {
+  const v = $('webhookUrl').value;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(v).then(
+      () => showMsg('已复制：' + v, 'ok'),
+      () => showMsg('复制失败，请手动选中复制：' + v, 'err')
+    );
+  } else {
+    showMsg('请手动复制：' + v, 'info');
+  }
+}
+
+loadStatus();
 </script>
 </body>
 </html>

@@ -122,17 +122,6 @@ pub fn render_results_png_bytes(results: &[ModelResult]) -> Option<Vec<u8>> {
     svg_to_png(&svg).ok()
 }
 
-/// 将结果渲染为 PNG data URL（base64）
-pub fn render_results_png(results: &[ModelResult]) -> String {
-    match render_results_png_bytes(results) {
-        Some(bytes) => {
-            let b64 = base64_encode(&bytes);
-            format!("data:image/png;base64,{}", b64)
-        }
-        None => String::new(),
-    }
-}
-
 fn svg_to_png(svg: &str) -> Result<Vec<u8>, ()> {
     use resvg::tiny_skia;
     let mut opt = resvg::usvg::Options::default();
@@ -147,11 +136,6 @@ fn svg_to_png(svg: &str) -> Result<Vec<u8>, ()> {
     let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height()).ok_or(())?;
     resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
     pixmap.encode_png().map_err(|_| ())
-}
-
-fn base64_encode(data: &[u8]) -> String {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    STANDARD.encode(data)
 }
 
 fn escape_xml(s: &str) -> String {
@@ -174,7 +158,6 @@ mod tests {
     #[test]
     fn embedded_font_and_png() {
         let result = ModelResult {
-            config_id: 0,
             model: "test-model".into(),
             ok: true,
             latency_ms: Some(123),

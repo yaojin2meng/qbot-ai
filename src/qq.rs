@@ -97,13 +97,12 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
     if body.len() > 64 * 1024 {
         return Response::error("payload too large", 413);
     }
-    let skip = ctx
-        .var("SKIP_SIGNATURE")
-        .map(|v| v.to_string() == "true")
-        .unwrap_or(false);
+    let skip = crate::config::flag(&ctx.env, crate::config::KEY_SKIP_SIGNATURE).await;
     if !skip {
         let now = Date::now().as_millis() as i64 / 1000;
-        if !timestamp_is_fresh(&ts, now) || !verify_signature(&ctx.env, &sig_hex, &ts, &body)? {
+        if !timestamp_is_fresh(&ts, now)
+            || !verify_signature(&ctx.env, &sig_hex, &ts, &body).await?
+        {
             return Response::error("invalid or expired signature", 401);
         }
     } else {
@@ -128,7 +127,7 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
         }
         return Response::from_json(&serde_json::json!({
             "plain_token": plain,
-            "signature": sign_validation(&ctx.env, event_ts, plain)?
+            "signature": sign_validation(&ctx.env, event_ts, plain).await?
         }));
     }
     if payload.op == OP_DISPATCH {
@@ -263,8 +262,12 @@ fn timestamp_is_fresh(ts: &str, now: i64) -> bool {
         .unwrap_or(false)
 }
 
-fn verify_signature(env: &Env, sig_hex: &str, ts: &str, body: &str) -> Result<bool> {
-    let seed = build_seed(&env.secret("QQ_APP_SECRET")?.to_string())?;
+async fn verify_signature(env: &Env, sig_hex: &str, ts: &str, body: &str) -> Result<bool> {
+    let secret = match crate::config::get(env, crate::config::KEY_APP_SECRET).await {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+    let seed = build_seed(&secret)?;
     let bytes = match hex::decode(sig_hex) {
         Ok(bytes) => bytes,
         Err(_) => return Ok(false),
@@ -279,9 +282,12 @@ fn verify_signature(env: &Env, sig_hex: &str, ts: &str, body: &str) -> Result<bo
         .is_ok())
 }
 
-fn sign_validation(env: &Env, ts: &str, plain: &str) -> Result<String> {
+async fn sign_validation(env: &Env, ts: &str, plain: &str) -> Result<String> {
     use ed25519_dalek::Signer;
-    let seed = build_seed(&env.secret("QQ_APP_SECRET")?.to_string())?;
+    let secret = crate::config::get(env, crate::config::KEY_APP_SECRET)
+        .await
+        .ok_or_else(|| Error::from("未配置 QQ_APP_SECRET，无法完成回调地址验证"))?;
+    let seed = build_seed(&secret)?;
     Ok(hex::encode(
         ed25519_dalek::SigningKey::from_bytes(&seed)
             .sign(format!("{ts}{plain}").as_bytes())
@@ -312,30 +318,92 @@ fn strip_mention(text: &str) -> &str {
 
 async fn handle_group_message(event: &GroupAtMessage, env: &Env) -> Result<()> {
     let text = strip_mention(&event.content);
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    // 帮助
+    if matches!(text, "帮助" | "help" | "?" | "？") {
+        return send_help(env, event).await;
+    }
+
+    // 投票 <主题> <人数>
     if let Some((topic, count)) = crate::poll::parse_vote_command(text) {
         return crate::poll::create_poll(env, &event.group_openid, &event.id, &topic, count).await;
     }
-    if let Some((base, key)) = crate::model_test::extract_api_and_key(text) {
-        let lease_key = format!("group-test:{}", event.group_openid);
-        if let Some(owner) = crate::security::acquire(env, &lease_key, 600).await? {
-            let result = crate::model_test::test_and_reply_group(
+
+    // 测速 <Base URL> <API Key>
+    // 只有以「测速」开头的消息才当测速指令，避免群里随口贴个链接就触发。
+    let test_text = match text.strip_prefix("测速") {
+        Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim(),
+        _ => "",
+    };
+    if !test_text.is_empty() {
+        if let Some((base, key)) = crate::model_test::extract_api_and_key(test_text) {
+            let lease_key = format!("group-test:{}", event.group_openid);
+            if let Some(owner) = crate::security::acquire(env, &lease_key, 600).await? {
+                let result = crate::model_test::test_and_reply_group(
+                    env,
+                    &event.group_openid,
+                    &event.id,
+                    &base,
+                    &key,
+                )
+                .await;
+                if result.is_err() {
+                    crate::security::release(env, &lease_key, &owner).await?;
+                }
+                return result;
+            }
+            return crate::qq_api::send_group(
                 env,
                 &event.group_openid,
-                &event.id,
-                &base,
-                &key,
+                serde_json::json!({
+                    "msg_type": 0,
+                    "content": "本群测速正在进行或处于冷却期，请 10 分钟后重试。",
+                    "msg_id": event.id,
+                    "msg_seq": 1
+                }),
             )
             .await;
-            if result.is_err() {
-                crate::security::release(env, &lease_key, &owner).await?;
-            }
-            return result;
         }
-        crate::qq_api::send_group(env, &event.group_openid, serde_json::json!({
-            "msg_type": 0, "content": "本群测速正在进行或处于冷却期，请 10 分钟后重试。", "msg_id": event.id, "msg_seq": 1
-        })).await?;
+        return crate::qq_api::send_group(
+            env,
+            &event.group_openid,
+            serde_json::json!({
+                "msg_type": 0,
+                "content": "没认出 API 地址或 Key。格式：测速 <Base URL> <API Key>，例如\n测速 https://api.deepseek.com/v1 sk-xxxx",
+                "msg_id": event.id,
+                "msg_seq": 1
+            }),
+        )
+        .await;
     }
+
     Ok(())
+}
+
+async fn send_help(env: &Env, event: &GroupAtMessage) -> Result<()> {
+    let content = "# 🤖 可用指令\n\n\
+**投票** `<主题> <人数>`\n\
+> 例：`投票 周末去爬山吗 10`\n\
+> 发出带三个按钮的卡片，每人一票，达到人数自动结算。\n\n\
+**测速** `<Base URL> <API Key>`\n\
+> 例：`测速 https://api.deepseek.com/v1 sk-xxxx`\n\
+> 最多测 30 个模型，结果出图发回群。\n\n\
+**帮助**\n\
+> 就是这条消息。";
+    crate::qq_api::send_group(
+        env,
+        &event.group_openid,
+        serde_json::json!({
+            "msg_type": 2,
+            "markdown": { "content": content },
+            "msg_id": event.id,
+            "msg_seq": 1
+        }),
+    )
+    .await
 }
 
 async fn handle_interaction(event: &InteractionCreate, event_id: &str, env: &Env) -> Result<()> {
