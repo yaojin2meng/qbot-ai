@@ -1,4 +1,5 @@
 import * as config from './config';
+import { ensureSchema, schemaState } from './db';
 import type { Env } from './env';
 import * as qq from './qq';
 import type { EventJob } from './qq';
@@ -16,6 +17,15 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const { pathname } = new URL(req.url);
 
+    // 自愈：第一次请求时把表建起来。以前靠手动跑 migrations，
+    // 少一步就是「表 0」，现在不需要任何人工步骤。
+    try {
+      await ensureSchema(env);
+    } catch (e) {
+      console.error('schema init failed:', e);
+      return json({ ok: false, message: (e as Error).message }, 500);
+    }
+
     switch (pathname) {
       case '/qq/webhook':
         if (req.method !== 'POST') return new Response('method not allowed', { status: 405 });
@@ -26,7 +36,7 @@ export default {
         return config.handleSetup(req, env);
 
       case '/api/status':
-        return json(await config.status(env));
+        return json({ ...(await config.status(env)), schema: await schemaState(env) });
 
       case '/api/verify':
         if (req.method !== 'POST') return new Response('method not allowed', { status: 405 });
@@ -43,6 +53,13 @@ export default {
   },
 
   async queue(batch: MessageBatch<EventJob>, env: Env): Promise<void> {
+    try {
+      await ensureSchema(env);
+    } catch (e) {
+      console.error('schema init failed:', e);
+      for (const message of batch.messages) message.retry();
+      return;
+    }
     for (const message of batch.messages) {
       try {
         await qq.processJob(message.body, env);

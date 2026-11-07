@@ -16,7 +16,6 @@ fallthrough = true
 binding = "DB"
 database_name = "qbot"
 database_id = "d48e40f1-82ae-4015-9a1c-a5d5715b8e4b"
-migrations_dir = "migrations"
 
 # KV：wrangler kv namespace create KV 之后把 id 填进来
 [[kv_namespaces]]

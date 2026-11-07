@@ -16,20 +16,17 @@ QQ 官方机器人（Cloudflare Workers + TypeScript），具备：
 - Cloudflare **Queues** 承接事件，先入队再 ACK
 - **WebCrypto Ed25519** 实现回调验签与 `op=13` 回调地址验证（无第三方加密库）
 
-产物体积：**51 KiB / gzip 16 KiB**，免费版 Workers（1 MiB gzip）绰绰有余。
+产物体积：**57 KiB / gzip 17 KiB**，免费版 Workers（1 MiB gzip）绰绰有余。
 
 ## 目录结构
 
 ```
 wrangler.toml          Workers / D1 / KV / Queues 绑定
 package.json           依赖与脚本
-migrations/
-  0001_init.sql        投票表
-  0002_reliability.sql 幂等表、租约锁、投票触发器
-  0003_settings.sql    运行时配置表
-  0004_cleanup.sql     清理废弃表
 src/
   index.ts             入口：路由 + 队列消费者
+  schema.ts            数据库结构（唯一的 DDL 来源，自动建表）
+  db.ts                首次请求自动建表 / 版本标记
   qq.ts                Ed25519 验签、op13 验证、事件派发、幂等消费
   qqApi.ts             QQ OpenAPI 封装、AccessToken 缓存、凭据自检
   poll.ts              投票指令解析 / 创建 / 按钮回调 / 结算
@@ -60,22 +57,28 @@ npx wrangler kv namespace create KV  # 把 id 填进 wrangler.toml
 npx wrangler queues create qqbot-events
 ```
 
-### 4. 初始化数据库
-```bash
-npx wrangler d1 migrations apply qbot --remote
-```
-
-### 5. 部署
+### 4. 部署
 ```bash
 npx wrangler deploy
 ```
 
-### 6. QQ 开放平台配置
+**不需要手动建表。** 部署完成后第一次访问（网页、Webhook 或队列消费）时，
+Worker 会自己执行 `src/schema.ts` 里的 DDL 把表建出来，并往 `settings`
+写一条 `schema_version`。之后每次冷启动只做一次只读版本探测，不重复建表。
+
+想确认建好了：访问 `https://<你的域名>/api/status`，返回里
+`"schema": {"version": 1, "ready": true}` 就对了。
+
+（旧版本靠 `wrangler d1 migrations apply`，现在 `migrations/` 目录已删除，
+schema 只在 `src/schema.ts` 一处维护。已经用旧 migration 建过表的库也能直接
+跑，缺的列会自动补上、脏计数会按明细表重算。）
+
+### 5. QQ 开放平台配置
 - 回调地址：`https://<你的域名>/qq/webhook`
 - 订阅事件：`GROUP_AT_MESSAGE_CREATE`、`INTERACTION_CREATE`
 - 需申请权限：群聊能力、主动消息、Markdown 消息、消息按钮（自定义按钮为内邀能力）
 
-### 7. 打开配置台
+### 6. 打开配置台
 访问 `https://<你的域名>/`，填 AppID / AppSecret。**只需填一次**，之后配置台变为只读。
 
 也可以不用网页，直接下发 secret：

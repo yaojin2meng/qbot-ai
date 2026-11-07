@@ -103,8 +103,15 @@ function button(id: Choice, label: string, visited: string, data: string) {
 }
 
 /**
- * 处理按钮点击。投票插入、计数更新、结算状态迁移都在迁移 0002 的触发器里
- * 由一条 SQLite 语句事务完成，这里只负责「读结果 + 补发结算消息」。
+ * 处理按钮点击。
+ *
+ * 落票 + 计数 + 关票在同一个 D1 事务（batch，全局原子）里完成：
+ * 1) 只有当票还开着、且还没满员时，INSERT 才会生效（INSERT OR IGNORE + WHERE）；
+ * 2) 紧接着从明细表 poll_votes 重算三个计数——明细是唯一真相，
+ *    所以不管来多少重复/并发请求，计数都不会漂；
+ * 3) 重算的同时判断是否满员，满了就把 status 切到 closed，
+ *    并把「是谁把票投满的」记进 summary_event_id。
+ * 以前这套逻辑靠 SQLite 触发器，改成重算后不依赖 D1 对触发器的支持。
  */
 export async function handleVoteClick(
   env: Env,
@@ -121,13 +128,37 @@ export async function handleVoteClick(
   const choice = parts[2] ?? '';
   if (!validId(pollId) || !CHOICES.includes(choice as Choice)) return;
 
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO poll_votes (poll_id, user_id, choice, created_at, event_id)
-     SELECT poll_id, ?2, ?3, ?4, ?5 FROM polls
-     WHERE poll_id=?1 AND group_id=?6 AND status='active'`,
-  )
-    .bind(pollId, userId, choice, Date.now(), eventId, groupId)
-    .run();
+  const now = Date.now();
+  const counts = (choice: Choice) =>
+    `(SELECT COUNT(*) FROM poll_votes v WHERE v.poll_id=polls.poll_id AND v.choice='${choice}')`;
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO poll_votes (poll_id, user_id, choice, created_at, event_id)
+       SELECT poll_id, ?2, ?3, ?4, ?5 FROM polls
+       WHERE poll_id=?1 AND group_id=?6 AND status='active'
+         AND target_count > (SELECT COUNT(*) FROM poll_votes v WHERE v.poll_id=polls.poll_id)`,
+    ).bind(pollId, userId, choice, now, eventId, groupId),
+    env.DB.prepare(
+      `UPDATE polls SET
+         agree    = ${counts('agree')},
+         disagree = ${counts('disagree')},
+         abstain  = ${counts('abstain')},
+         status   = CASE WHEN status='active'
+                          AND ${counts('agree')} + ${counts('disagree')} + ${counts('abstain')}
+                              >= target_count
+                         THEN 'closed' ELSE status END,
+         closed_at        = CASE WHEN status='active'
+                                  AND ${counts('agree')} + ${counts('disagree')} + ${counts('abstain')}
+                                      >= target_count
+                                 THEN ?2 ELSE closed_at END,
+         summary_event_id = CASE WHEN status='active'
+                                  AND ${counts('agree')} + ${counts('disagree')} + ${counts('abstain')}
+                                      >= target_count
+                                 THEN ?3 ELSE summary_event_id END
+       WHERE poll_id=?1 AND group_id=?4`,
+    ).bind(pollId, now, eventId, groupId),
+  ]);
 
   const row = await env.DB.prepare(
     `SELECT agree, disagree, abstain, target_count, topic, status, summary_event_id, summary_sent
