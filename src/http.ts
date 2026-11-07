@@ -18,12 +18,19 @@ export async function fetchJson(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
   try {
+    // Workers 的 fetch 只认 'follow' 和 'manual'，传 'error' 会直接抛
+    // "Invalid redirect value"。这里用 manual，然后自己把 3xx 当失败，
+    // 语义等于 Node/undici 的 redirect:'error'。
     const resp = await fetch(url, {
       ...init,
-      redirect: 'error',
+      redirect: 'manual',
       signal: controller.signal,
     });
     const status = resp.status;
+    if (status >= 300 && status < 400) {
+      await resp.body?.cancel();
+      throw new Error(`upstream returned HTTP ${status} (redirect not followed)`);
+    }
     if (status === 204 || status === 205) {
       return { status, json: null };
     }
