@@ -111,6 +111,8 @@ npx wrangler secret put QQ_APP_SECRET
 | 投票按钮 | `action.type=1`（回调后台），**不是** 2（指令按钮） |
 | 按钮点击回应 | 必须 `PUT /interactions/{id}` body `{"code":0}`，否则客户端一直 loading |
 | 群用户字段 | `INTERACTION_CREATE` 用 `group_member_openid`；群@消息用 `author.member_openid` |
+| 测速报告 | 走**主动消息 + Markdown**（不带 `msg_id`），不受 5 分钟被动回复窗口限制；发送失败自动回退纯文本被动回复 |
+| 投票计数 | 落票 + 从明细表重算 + 满员关票在同一个 D1 `batch` 事务里完成，不依赖触发器 |
 | 回调地址验证 op=13 | 返回 `{plain_token, signature}`，signature=`hex(Ed25519(event_ts+plain_token))` |
 | 验签 | `X-Signature-Ed25519` / `X-Signature-Timestamp`，签名体=`timestamp+body`，seed=`AppSecret` 重复至 32 字节 |
 | 事件解析 | 事件类型在 `payload.t`，事件体在 `payload.d` |

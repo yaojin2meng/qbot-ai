@@ -297,6 +297,25 @@ function formatReport(results: ModelResult[]): string {
 }
 
 /**
+ * Markdown 版报告。只用 QQ Markdown 支持的语法（加粗、列表、引用），
+ * 不写表格 —— QQ 客户端对表格支持不一致。
+ */
+function formatReportMarkdown(results: ModelResult[]): string {
+  const okCount = results.filter((r) => r.ok).length;
+  const lines = [
+    '**模型测速报告**',
+    '',
+    `成功 **${okCount}/${results.length}**，单位 ms`,
+    '',
+  ];
+  for (const r of results) {
+    const detail = r.ok ? `${r.latency_ms ?? 0} ms` : `❌ ${r.error ?? '失败'}`;
+    lines.push(`- ${truncate(r.model, 60)}: ${detail}`);
+  }
+  return truncate(lines.join('\n'), MAX_REPORT_CHARS);
+}
+
+/**
  * 发消息但永不抛错：投递失败只记日志。
  *
  * 测速本身已经花掉了上游额度，如果仅仅因为消息没发出去（比如超出 QQ 的
@@ -309,6 +328,39 @@ async function safeSend(env: Env, group: string, payload: unknown): Promise<void
   } catch (e) {
     console.error('QQ message delivery failed:', e);
   }
+}
+
+/**
+ * 发最终报告：优先「主动消息 + Markdown」，失败回退「被动回复 + 纯文本」。
+ *
+ * 为什么用主动消息：主动消息不带 msg_id/msg_seq，不受 QQ「被动回复必须 5 分钟内、
+ * 同一条最多 5 次」的限制。测速最长要 90 秒，加上队列延迟，被动回复很容易超窗，
+ * 超了报告就发不出去。主动消息的代价是走配额（Bot 维度 60 qpm、单群 20 qpm /
+ * 每天 1000 条），一次测速只用 1 条，完全够。
+ *
+ * 回退路径保证「万一没开 Markdown 权限或配额耗尽」，用户至少还能拿到纯文本结果。
+ */
+async function sendReport(
+  env: Env,
+  group: string,
+  msg: string,
+  results: ModelResult[],
+): Promise<void> {
+  try {
+    await sendGroup(env, group, {
+      msg_type: 2,
+      markdown: { content: formatReportMarkdown(results) },
+    });
+    return;
+  } catch (e) {
+    console.error('markdown report delivery failed, falling back to plain text:', e);
+  }
+  await safeSend(env, group, {
+    msg_type: 0,
+    content: formatReport(results),
+    msg_id: msg,
+    msg_seq: 3,
+  });
 }
 
 export async function testAndReplyGroup(
@@ -356,11 +408,5 @@ export async function testAndReplyGroup(
   }
 
   const results = await testModels(normalized, key, models);
-  // 纯文本：需要的 QQ 权限最少，也不会被上游模型名注入 Markdown。
-  await safeSend(env, group, {
-    msg_type: 0,
-    content: formatReport(results),
-    msg_id: msg,
-    msg_seq: 3,
-  });
+  await sendReport(env, group, msg, results);
 }
